@@ -1,0 +1,1146 @@
+import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { FileInfo } from './lib/types';
+import { useNavigation } from './hooks/useNavigation';
+import { useHotkeys, HotkeyAction } from './hooks/useHotkeys';
+import CbzViewer from './components/CbzViewer';
+import CompareViewer from './components/CompareViewer';
+import RepackViewer from './components/RepackViewer';
+import PlaylistPanel from './components/PlaylistPanel';
+import SettingsModal from './components/SettingsModal';
+
+// ─── Electron API Type ─────────────────────────────────────────────────────────
+
+declare global {
+  interface Window {
+    electronAPI: {
+      getWindowType: () => Promise<'viewer' | 'playlist'>;
+      onStateUpdate: (callback: (state: any) => void) => void;
+      broadcastState: (state: any) => void;
+      onHotkeyTriggered: (callback: (action: string) => void) => void;
+      setViewerTheme: (dark: boolean) => void;
+      onViewerThemeChanged: (callback: (dark: boolean) => void) => void;
+      loadFolder: (folderPath: string) => Promise<{ files: FileInfo[]; sortDestination: string }>;
+      loadPaths: (filePaths: string[]) => Promise<{ files: FileInfo[]; sortDestination: string | null }>;
+      pickFolder: () => Promise<string | null>;
+      getPathForFile: (file: File) => string;
+      sortFile: (filePath: string, categoryId: string, sortDest: string) => Promise<{ success: boolean; isDupe?: boolean; error?: string; action?: string }>;
+      renameFile: (oldPath: string, newName: string) => Promise<{ success: boolean; file: FileInfo | null; error: string | null }>;
+      trashFiles: (paths: string[]) => Promise<{ path: string; success: boolean }[]>;
+      extractCbz: (cbzPath: string, slot?: string) => Promise<{ images: string[]; extractionId: string | null; error: string | null }>;
+      cleanupCbz: (slot?: string) => Promise<void>;
+      onExtractionProgress: (callback: (progress: { percent: number; status: string }) => void) => void;
+      repackCbz: (originalPath: string, slot: string, keepIndices: number[], renames: Record<string, string>) => Promise<{ success: boolean; error?: string }>;
+      loadSettings: () => Promise<any>;
+      saveSettings: (settings: any) => Promise<{ success: boolean }>;
+      onMenuAction: (callback: (action: string) => void) => void;
+      quitApp: (uiState?: any) => void;
+      loadConfig: () => Promise<any>;
+      saveUiState: (state: any) => void;
+      setDockedMode: (docked: boolean) => void;
+      toggleFullscreen: () => void;
+      exitFullscreen: () => void;
+      onDockedModeChanged: (callback: (docked: boolean) => void) => void;
+      broadcastPlaylistState: (state: any) => void;
+      onPlaylistStateUpdate: (callback: (state: any) => void) => void;
+      sendPlaylistAction: (action: any) => void;
+      onPlaylistAction: (callback: (action: any) => void) => void;
+    };
+  }
+}
+
+// ─── Drop Zone Hook ────────────────────────────────────────────────────────────
+
+function useDropZone(onFilesLoaded: (files: FileInfo[], sortDest: string | null) => void) {
+  const [dragging, setDragging] = useState(false);
+  const [el, setEl] = useState<HTMLDivElement | null>(null);
+
+  // Callback ref — re-runs when the DOM element attaches/detaches
+  const containerRef = useCallback((node: HTMLDivElement | null) => {
+    setEl(node);
+  }, []);
+
+  useEffect(() => {
+    if (!el) return;
+    let dragCounter = 0;
+
+    const handleDragEnter = (e: globalThis.DragEvent) => { e.preventDefault(); dragCounter++; setDragging(true); };
+    const handleDragOver = (e: globalThis.DragEvent) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'; };
+    const handleDragLeave = (e: globalThis.DragEvent) => { e.preventDefault(); dragCounter--; if (dragCounter <= 0) { dragCounter = 0; setDragging(false); } };
+    const handleDrop = async (e: globalThis.DragEvent) => {
+      e.preventDefault(); dragCounter = 0; setDragging(false);
+      if (!window.electronAPI || !e.dataTransfer) return;
+      const items = e.dataTransfer.files;
+      if (!items || items.length === 0) return;
+      const paths: string[] = [];
+      for (let i = 0; i < items.length; i++) { const p = window.electronAPI.getPathForFile(items[i]); if (p) paths.push(p); }
+      if (paths.length === 0) return;
+      const isSingleNonCbz = paths.length === 1 && !paths[0].toLowerCase().endsWith('.cbz');
+      if (isSingleNonCbz) {
+        try { const r = await window.electronAPI.loadFolder(paths[0]); if (r.files.length > 0) { onFilesLoaded(r.files, r.sortDestination); return; } } catch {}
+      }
+      const r = await window.electronAPI.loadPaths(paths);
+      if (r.files.length > 0) onFilesLoaded(r.files, r.sortDestination);
+    };
+
+    el.addEventListener('dragenter', handleDragEnter);
+    el.addEventListener('dragover', handleDragOver);
+    el.addEventListener('dragleave', handleDragLeave);
+    el.addEventListener('drop', handleDrop);
+    return () => { el.removeEventListener('dragenter', handleDragEnter); el.removeEventListener('dragover', handleDragOver); el.removeEventListener('dragleave', handleDragLeave); el.removeEventListener('drop', handleDrop); };
+  }, [el, onFilesLoaded]);
+
+  return { dragging, containerRef };
+}
+
+// ─── Shared playlist state hook ────────────────────────────────────────────────
+
+interface LogEntry {
+  time: string;
+  text: string;
+  color: string;
+  emoji: string;
+}
+
+interface SessionStats {
+  opened: number;
+  skipped: number;
+  kept: number;
+  purged: number;
+  fixed: number;
+  translated: number;
+  inquired: number;
+  unreadable: number;
+}
+
+interface CategoryConfig {
+  id: string;
+  label: string;
+  folderName: string;
+  hotkey: string;
+  color: string;
+  parentCategory?: string;
+  dupeFolderName?: string;
+  isPurge?: boolean;
+}
+
+const DEFAULT_CATEGORIES: CategoryConfig[] = [
+  { id: 'keep', label: 'Keep', folderName: '[00-Keep]', hotkey: 'k', color: 'emerald', dupeFolderName: '[Keep Dupes]' },
+  { id: 'purge', label: 'Purge', folderName: '', hotkey: 'p', color: 'red', isPurge: true },
+  { id: 'fix', label: 'To Fix', folderName: '[Needs Fixing]', hotkey: 'f', color: 'amber', dupeFolderName: '[Fix Dupes]' },
+  { id: 'translate', label: 'Translate', folderName: '[To Be Translated OG]', hotkey: 't', color: 'sky', dupeFolderName: '[To Be TL Dupes]' },
+  { id: 'inquire', label: 'Inquire', folderName: '[00-Inquire]', hotkey: 'i', color: 'purple', parentCategory: 'keep' },
+  { id: 'unreadable', label: 'Unreadable', folderName: '[File Name Too Long]', hotkey: 'u', color: 'rose' },
+];
+
+function usePlaylistState() {
+  const [files, setFiles] = useState<FileInfo[]>([]);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [sessionStartTime] = useState(() => Date.now());
+  const [stats, setStats] = useState<SessionStats>({ opened: 0, skipped: 0, kept: 0, purged: 0, fixed: 0, translated: 0, inquired: 0, unreadable: 0 });
+  const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
+  const [categories, setCategories] = useState<CategoryConfig[]>(DEFAULT_CATEGORIES);
+  const [sortDestination, setSortDestination] = useState<string | null>(null);
+  const [shuffleEnabled, setShuffleEnabled] = useState(false);
+  const [skipViewedEnabled, setSkipViewedEnabled] = useState(false);
+  const [writeLogsEnabled, setWriteLogsEnabled] = useState(false);
+  const [globalHotkeys, setGlobalHotkeys] = useState(false);
+  const [viewedPaths, setViewedPaths] = useState<Set<string>>(new Set());
+  const [paneDark, setPaneDark] = useState(true);
+  const [viewerDark, setViewerDark] = useState(true);
+  const [isDocked, setIsDocked] = useState(false);
+  const [renamingIndex, setRenamingIndex] = useState<number | null>(null);
+  const currentIndexRef = useRef(0);
+  useEffect(() => { currentIndexRef.current = currentIndex; }, [currentIndex]);
+
+  // Compare mode
+  const [compareMode, setCompareMode] = useState(false);
+  const [compareFileIndex, setCompareFileIndex] = useState<number | null>(null);
+  const [compareLeftIndex, setCompareLeftIndex] = useState<number | null>(null); // For pick-two mode
+  const [comparePickMode, setComparePickMode] = useState(false); // Pick one (compare with current)
+  const [comparePickTwoMode, setComparePickTwoMode] = useState(false); // Pick two files
+
+  const startRenaming = useCallback(() => {
+    setRenamingIndex(currentIndexRef.current);
+  }, []);
+
+  const [configLoaded, setConfigLoaded] = useState(false);
+
+  // Load saved config on mount
+  useEffect(() => {
+    if (!window.electronAPI) { setConfigLoaded(true); return; }
+    window.electronAPI.loadConfig().then((cfg: any) => {
+      if (cfg.paneDark !== undefined) setPaneDark(cfg.paneDark);
+      if (cfg.viewerDark !== undefined) setViewerDark(cfg.viewerDark);
+      if (cfg.isDocked !== undefined) setIsDocked(cfg.isDocked);
+      if (cfg.categories?.length > 0) setCategories(cfg.categories);
+      if (cfg.writeLogsEnabled !== undefined) setWriteLogsEnabled(cfg.writeLogsEnabled);
+      setConfigLoaded(true);
+    });
+  }, []);
+
+  const broadcast = useCallback((idx: number) => {
+    window.electronAPI?.broadcastState({ currentIndex: idx });
+  }, []);
+  const addViewed = useCallback((path: string) => { setViewedPaths(prev => new Set(prev).add(path)); }, []);
+  const resetViewed = useCallback(() => { setViewedPaths(new Set()); }, []);
+
+  const addLog = useCallback((text: string, color: string, emoji: string) => {
+    const now = new Date();
+    const time = now.toLocaleTimeString('en-US', { hour12: false });
+    setLogEntries(prev => [{ time, text, color, emoji }, ...prev].slice(0, 500));
+  }, []);
+
+  const incrementStat = useCallback((key: keyof SessionStats) => {
+    setStats(prev => ({ ...prev, [key]: prev[key] + 1 }));
+  }, []);
+
+  const clearLog = useCallback(() => { setLogEntries([]); }, []);
+
+  const { navigate, jumpTo } = useNavigation({
+    files, currentIndex, shuffleEnabled, skipViewedEnabled, viewedPaths,
+    setCurrentIndex, addViewed, resetViewed, broadcast,
+  });
+
+  const handleViewerTheme = useCallback((dark: boolean) => {
+    setViewerDark(dark);
+    window.electronAPI?.setViewerTheme(dark);
+  }, []);
+
+  const handleRename = useCallback(async (oldPath: string, newName: string) => {
+    if (!window.electronAPI) return;
+    const result = await window.electronAPI.renameFile(oldPath, newName);
+    if (result.success && result.file) {
+      setFiles(prev => {
+        const updated = prev.map(f => f.fullPath === oldPath ? result.file! : f);
+        return updated;
+      });
+      // Broadcast updated file list
+      setFiles(prev => {
+        window.electronAPI?.broadcastState({ files: prev });
+        return prev;
+      });
+    } else if (result.error) {
+      alert(`Rename failed: ${result.error}`);
+    }
+  }, []);
+
+  // Sort action: move/purge current file, remove from playlist, advance to next
+  const [isProcessing, setIsProcessing] = useState(false);
+
+  const handleSort = useCallback(async (categoryId: string) => {
+    if (!window.electronAPI || isProcessing) return;
+    if (files.length === 0 || !sortDestination) return;
+
+    const file = files[currentIndexRef.current];
+    if (!file) return;
+
+    setIsProcessing(true);
+
+    try {
+      const result = await window.electronAPI.sortFile(file.fullPath, categoryId, sortDestination);
+      if (!result.success) {
+        addLog(`Failed: ${file.name} — ${result.error}`, 'text-red-400', '❌');
+        alert(`Sort failed: ${result.error}`);
+        setIsProcessing(false);
+        return;
+      }
+
+      // Log and update stats
+      const logMap: Record<string, { color: string; emoji: string; stat: keyof SessionStats; label: string }> = {
+        keep:       { color: 'text-emerald-400', emoji: '✅', stat: 'kept', label: 'Kept' },
+        purge:      { color: 'text-red-400',     emoji: '❌', stat: 'purged', label: 'Purged' },
+        fix:        { color: 'text-amber-400',   emoji: '🔧', stat: 'fixed', label: 'To Fix' },
+        translate:  { color: 'text-sky-400',     emoji: '📖', stat: 'translated', label: 'To TL' },
+        inquire:    { color: 'text-purple-400',  emoji: '🔍', stat: 'inquired', label: 'Inquire' },
+        unreadable: { color: 'text-rose-400',    emoji: '⚠️', stat: 'unreadable', label: 'Unreadable' },
+      };
+      const info = logMap[categoryId];
+      if (info && writeLogsEnabled) {
+        const pos = `[${currentIndexRef.current + 1}/${files.length}]`;
+        addLog(`${pos} ${info.label}: ${file.name}${result.isDupe ? ' (dupe)' : ''}`, info.color, info.emoji);
+        incrementStat(info.stat);
+      }
+
+      // Remove from playlist and advance
+      const idx = currentIndexRef.current;
+      setFiles(prev => {
+        const updated = prev.filter(f => f.fullPath !== file.fullPath);
+        let newIdx = idx;
+        if (updated.length === 0) {
+          newIdx = 0;
+        } else if (idx >= updated.length) {
+          newIdx = 0;
+        }
+        setCurrentIndex(newIdx);
+        currentIndexRef.current = newIdx;
+        // Broadcast so viewer extracts next file and detached playlist updates
+        window.electronAPI?.broadcastState({ files: updated, currentIndex: newIdx });
+        return updated;
+      });
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [files, sortDestination, isProcessing]);
+
+  const handleDeleteFiles = useCallback(async (paths: string[]) => {
+    if (!window.electronAPI || paths.length === 0) return;
+    const results = await window.electronAPI.trashFiles(paths);
+    const deleted = new Set(results.filter(r => r.success).map(r => r.path));
+    if (deleted.size > 0) {
+      setFiles(prev => {
+        const updated = prev.filter(f => !deleted.has(f.fullPath));
+        window.electronAPI?.broadcastState({ files: updated });
+        return updated;
+      });
+    }
+  }, []);
+
+  const handleRemoveFromPlaylist = useCallback((paths: string[]) => {
+    const toRemove = new Set(paths);
+    setFiles(prev => {
+      const updated = prev.filter(f => !toRemove.has(f.fullPath));
+      window.electronAPI?.broadcastState({ files: updated });
+      return updated;
+    });
+  }, []);
+
+  // Compare mode: compare a file with the current file
+  const startCompareWithFile = useCallback((fileIndex: number) => {
+    if (comparePickTwoMode) {
+      if (compareLeftIndex === null) {
+        setCompareLeftIndex(fileIndex);
+      } else {
+        // Can't compare a file with itself
+        if (fileIndex === compareLeftIndex) return;
+        setCurrentIndex(compareLeftIndex);
+        currentIndexRef.current = compareLeftIndex;
+        setCompareFileIndex(fileIndex);
+        setCompareMode(true);
+        setComparePickMode(false);
+        setComparePickTwoMode(false);
+        setCompareLeftIndex(null);
+      }
+      return;
+    }
+    // Normal pick mode: can't compare current file with itself
+    if (fileIndex === currentIndexRef.current) return;
+    setCompareFileIndex(fileIndex);
+    setCompareMode(true);
+    setComparePickMode(false);
+  }, [comparePickTwoMode, compareLeftIndex]);
+
+  // Cycle: Off → Pick with current → Pick two → Off
+  const cycleComparePick = useCallback(() => {
+    if (!comparePickMode && !comparePickTwoMode) {
+      // Off → Pick with current
+      setComparePickMode(true);
+      setComparePickTwoMode(false);
+      setCompareLeftIndex(null);
+    } else if (comparePickMode && !comparePickTwoMode) {
+      // Pick with current → Pick two
+      setComparePickMode(false);
+      setComparePickTwoMode(true);
+      setCompareLeftIndex(null);
+    } else {
+      // Pick two → Off
+      setComparePickMode(false);
+      setComparePickTwoMode(false);
+      setCompareLeftIndex(null);
+    }
+  }, [comparePickMode, comparePickTwoMode]);
+
+  const cancelComparePick = useCallback(() => {
+    setComparePickMode(false);
+    setComparePickTwoMode(false);
+    setCompareLeftIndex(null);
+  }, []);
+
+  const exitCompare = useCallback(() => {
+    setCompareMode(false);
+    setCompareFileIndex(null);
+    setComparePickMode(false);
+    setComparePickTwoMode(false);
+    setCompareLeftIndex(null);
+    window.electronAPI?.cleanupCbz('compare-left');
+    window.electronAPI?.cleanupCbz('compare-right');
+  }, []);
+
+  const handleToggleDocked = useCallback(() => {
+    const newDocked = !isDocked;
+    setIsDocked(newDocked);
+    window.electronAPI?.setDockedMode(newDocked);
+  }, [isDocked]);
+
+  // Listen for docked mode changes from other window
+  useEffect(() => {
+    if (!window.electronAPI) return;
+    window.electronAPI.onDockedModeChanged((docked) => setIsDocked(docked));
+  }, []);
+
+  return {
+    files, setFiles, currentIndex, setCurrentIndex, sortDestination, setSortDestination,
+    shuffleEnabled, setShuffleEnabled, skipViewedEnabled, setSkipViewedEnabled,
+    globalHotkeys, setGlobalHotkeys, viewedPaths, setViewedPaths,
+    paneDark, setPaneDark, viewerDark, setViewerDark, isDocked,
+    renamingIndex, setRenamingIndex, startRenaming, handleRename,
+    handleSort, isProcessing,
+    handleDeleteFiles, handleRemoveFromPlaylist,
+    compareMode, compareFileIndex, comparePickMode, comparePickTwoMode, compareLeftIndex,
+    startCompareWithFile, cycleComparePick, cancelComparePick, exitCompare,
+    categories, setCategories,
+    writeLogsEnabled, setWriteLogsEnabled,
+    stats, logEntries, sessionStartTime, addLog, incrementStat, clearLog,
+    navigate, jumpTo, handleViewerTheme, handleToggleDocked,
+  };
+}
+
+// ─── Viewer Window ─────────────────────────────────────────────────────────────
+
+function ViewerWindow() {
+  const [darkMode, setDarkMode] = useState(true);
+  const [images, setImages] = useState<string[]>([]);
+  const [extractionId, setExtractionId] = useState<string | null>(null);
+  const [extractKey, setExtractKey] = useState(0);
+  const [extracting, setExtracting] = useState(false);
+  const [extractProgress, setExtractProgress] = useState({ percent: 0, status: '' });
+  const [error, setError] = useState<string | null>(null);
+  const extractionCounterRef = useRef(0);
+  const filesRef = useRef<FileInfo[]>([]);
+  const indexRef = useRef<number>(0);
+
+  const ps = usePlaylistState();
+
+  // Compare mode extraction state
+  const [compareLeftImages, setCompareLeftImages] = useState<string[]>([]);
+  const [compareLeftId, setCompareLeftId] = useState('');
+  const [compareRightImages, setCompareRightImages] = useState<string[]>([]);
+  const [compareRightId, setCompareRightId] = useState('');
+  const [compareSwapped, setCompareSwapped] = useState(false);
+
+  // Start compare mode: extract both files
+  useEffect(() => {
+    if (!ps.compareMode || ps.compareFileIndex === null || !window.electronAPI) return;
+
+    const currentFile = filesRef.current[indexRef.current];
+    const compareFile = filesRef.current[ps.compareFileIndex];
+    if (!currentFile || !compareFile) return;
+
+    // Extract both sides sequentially to avoid race conditions
+    setCompareLeftImages([]);
+    setCompareRightImages([]);
+    setCompareLeftId('');
+    setCompareRightId('');
+    setCompareSwapped(false);
+
+    (async () => {
+      try {
+        const leftResult = await window.electronAPI.extractCbz(currentFile.fullPath, 'compare-left');
+        if (!ps.compareMode) return;
+        setCompareLeftImages(leftResult.images);
+        setCompareLeftId(leftResult.extractionId ?? '');
+
+        const rightResult = await window.electronAPI.extractCbz(compareFile.fullPath, 'compare-right');
+        if (!ps.compareMode) return;
+        setCompareRightImages(rightResult.images);
+        setCompareRightId(rightResult.extractionId ?? '');
+      } catch (err) {
+        console.error('Compare extraction failed:', err);
+      }
+    })();
+  }, [ps.compareMode, ps.compareFileIndex]);
+
+  const doExtract = useCallback((filePath: string) => {
+    if (!filePath || !window.electronAPI) return;
+
+    const myCounter = ++extractionCounterRef.current;
+    // Each extraction uses a unique slot so they don't block each other
+    const slot = `main-${myCounter}`;
+
+    setExtracting(true);
+    setError(null);
+    setImages([]);
+    setExtractProgress({ percent: 0, status: 'Starting...' });
+
+    // Clean up the previous extraction's slot asynchronously (don't wait)
+    if (myCounter > 1) {
+      window.electronAPI.cleanupCbz(`main-${myCounter - 1}`);
+    }
+
+    window.electronAPI.extractCbz(filePath, slot).then((result) => {
+      // Only apply if this is still the latest extraction request
+      if (extractionCounterRef.current !== myCounter) {
+        // This extraction is stale — clean up its slot
+        window.electronAPI?.cleanupCbz(slot);
+        return;
+      }
+
+      if (result.error) { setError(result.error); setImages([]); setExtractionId(null); }
+      else { setImages(result.images); setExtractionId(result.extractionId); setExtractKey(k => k + 1); }
+      setExtracting(false);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!window.electronAPI) return;
+    window.electronAPI.onViewerThemeChanged((dark) => setDarkMode(dark));
+    window.electronAPI.onExtractionProgress((progress) => setExtractProgress(progress));
+    window.electronAPI.onMenuAction?.((action) => {
+      switch (action) {
+        case 'open-settings': setSettingsOpen(true); break;
+        case 'fullscreen':
+          window.electronAPI?.toggleFullscreen();
+          break;
+        case 'toggle-playlist':
+          // handled via hotkeys
+          break;
+      }
+    });
+    window.electronAPI.onStateUpdate((state) => {
+      if (state.files) { filesRef.current = state.files; ps.setFiles(state.files); }
+      if (state.currentIndex !== undefined) { indexRef.current = state.currentIndex; ps.setCurrentIndex(state.currentIndex); }
+      if (state.sortDestination !== undefined) ps.setSortDestination(state.sortDestination);
+      const f = state.files ?? filesRef.current;
+      const idx = state.currentIndex ?? indexRef.current;
+      const file = f[idx];
+      if (file) {
+        ps.setViewedPaths(prev => new Set(prev).add(file.fullPath));
+        doExtract(file.fullPath);
+      }
+    });
+  }, [doExtract]);
+
+  const navigateFile = useCallback((direction: 'next' | 'prev' | 'random') => {
+    const f = filesRef.current;
+    const idx = indexRef.current;
+    if (f.length === 0) return;
+    let newIdx: number;
+    if (direction === 'random') newIdx = Math.floor(Math.random() * f.length);
+    else if (direction === 'next') newIdx = idx + 1 < f.length ? idx + 1 : 0;
+    else newIdx = idx > 0 ? idx - 1 : f.length - 1;
+    ps.setCurrentIndex(newIdx);
+    indexRef.current = newIdx;
+    // Mark as viewed
+    if (f[newIdx]) {
+      ps.setViewedPaths(prev => new Set(prev).add(f[newIdx].fullPath));
+    }
+    doExtract(f[newIdx]?.fullPath);
+    window.electronAPI?.broadcastState({ currentIndex: newIdx });
+  }, [doExtract]);
+
+  // Viewer drop = replace playlist
+  const handleViewerDrop = useCallback((loadedFiles: FileInfo[], sortDest: string | null) => {
+    ps.setFiles(loadedFiles);
+    ps.setCurrentIndex(0);
+    ps.setSortDestination(sortDest);
+    ps.setViewedPaths(new Set([loadedFiles[0]?.fullPath].filter(Boolean)));
+    filesRef.current = loadedFiles;
+    indexRef.current = 0;
+    if (loadedFiles[0]) doExtract(loadedFiles[0].fullPath);
+    window.electronAPI?.broadcastState({ files: loadedFiles, currentIndex: 0, sortDestination: sortDest });
+  }, [doExtract]);
+
+  // Docked playlist drop = append to bottom of playlist
+  const handlePlaylistDrop = useCallback((loadedFiles: FileInfo[], sortDest: string | null) => {
+    const currentFiles = filesRef.current;
+    const existingPaths = new Set(currentFiles.map(f => f.fullPath));
+    const newFiles = loadedFiles.filter(f => !existingPaths.has(f.fullPath));
+    if (newFiles.length === 0) return;
+    const combined = [...currentFiles, ...newFiles];
+    ps.setFiles(combined);
+    filesRef.current = combined;
+    if (sortDest) ps.setSortDestination(sortDest);
+    window.electronAPI?.broadcastState({ files: combined, sortDestination: sortDest });
+  }, []);
+
+  const { dragging: viewerDragging, containerRef: viewerDropRef } = useDropZone(handleViewerDrop);
+  const { dragging: playlistDragging, containerRef: playlistDropRef } = useDropZone(handlePlaylistDrop);
+
+  // Docked panel state — load saved values
+  const [panelWidth, setPanelWidth] = useState(320);
+  const [playlistVisible, setPlaylistVisible] = useState(true);
+  const [centerPage, setCenterPage] = useState(false);
+  const [controlsHideDelay, setControlsHideDelay] = useState(1500);
+  const [controlBarMode, setControlBarMode] = useState<'auto-hide' | 'hover-only' | 'always-visible'>('auto-hide');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [repackMode, setRepackMode] = useState(false);
+  const [darkBgBrightness, setDarkBgBrightness] = useState(26);
+  const [lightBgBrightness, setLightBgBrightness] = useState(232);
+  const [repackColumns, setRepackColumns] = useState(3);
+  const [repackThumbnailSize, setRepackThumbnailSize] = useState(150);
+  const [repackPanelWidth, setRepackPanelWidth] = useState(40);
+
+  useEffect(() => {
+    if (!window.electronAPI) return;
+    window.electronAPI.loadConfig().then((cfg: any) => {
+      if (cfg.dockedPanelWidth) setPanelWidth(cfg.dockedPanelWidth);
+      if (cfg.playlistVisible !== undefined) setPlaylistVisible(cfg.playlistVisible);
+      if (cfg.centerPage !== undefined) setCenterPage(cfg.centerPage);
+      if (cfg.controlsHideDelay) setControlsHideDelay(cfg.controlsHideDelay);
+      if (cfg.controlBarMode) setControlBarMode(cfg.controlBarMode);
+      if (cfg.darkBgBrightness !== undefined) setDarkBgBrightness(cfg.darkBgBrightness);
+      if (cfg.lightBgBrightness !== undefined) setLightBgBrightness(cfg.lightBgBrightness);
+      if (cfg.repackColumns) setRepackColumns(cfg.repackColumns);
+      if (cfg.repackThumbnailSize) setRepackThumbnailSize(cfg.repackThumbnailSize);
+      if (cfg.repackPanelWidth) setRepackPanelWidth(cfg.repackPanelWidth);
+      // Set beep settings for CbzViewer
+      (window as any).__cbzSettings = {
+        beepOnLastPage: cfg.beepOnLastPage ?? true,
+        beepVolume: cfg.beepVolume ?? 0.15,
+        beepPitch: cfg.beepPitch ?? 600,
+      };
+    });
+  }, []);
+
+  // Resizable docked panel — clamped by content width in center mode
+  // Lock panel width when entering compare mode
+  const comparePanelLock = useRef<number | null>(null);
+  useEffect(() => {
+    if (ps.compareMode) {
+      comparePanelLock.current = panelWidth;
+    } else {
+      comparePanelLock.current = null;
+    }
+  }, [ps.compareMode]);
+
+  const handlePanelResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = panelWidth;
+    const onMove = (ev: MouseEvent) => {
+      const delta = startX - ev.clientX;
+      let maxW = 600;
+
+      // In compare mode, lock panel to its width at compare start
+      if (comparePanelLock.current !== null) {
+        maxW = comparePanelLock.current;
+      }
+
+      // In center mode, limit panel width so images aren't covered
+      if (centerPage && comparePanelLock.current === null) {
+        const viewer = (window as any).__cbzViewer;
+        if (viewer) {
+          const cw = viewer.getContentWidth?.() ?? 0;
+          if (cw > 0) {
+            const windowWidth = window.innerWidth;
+            const toggleW = 12;
+            maxW = Math.min(maxW, windowWidth - cw - toggleW - 20);
+          }
+        }
+      }
+
+      setPanelWidth(Math.max(330, Math.min(maxW, startW + delta)));
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [panelWidth, centerPage]);
+
+  // Broadcast full playlist state to detached window whenever anything changes
+  useEffect(() => {
+    if (!window.electronAPI || ps.isDocked) return;
+    window.electronAPI.broadcastPlaylistState({
+      files: ps.files,
+      currentIndex: ps.currentIndex,
+      sortDestination: ps.sortDestination,
+      viewedPaths: [...ps.viewedPaths], // Serialize Set to array
+      shuffleEnabled: ps.shuffleEnabled,
+      skipViewedEnabled: ps.skipViewedEnabled,
+      writeLogsEnabled: ps.writeLogsEnabled,
+      globalHotkeys: ps.globalHotkeys,
+      paneDark: ps.paneDark,
+      viewerDark: ps.viewerDark,
+      isDocked: ps.isDocked,
+      renamingIndex: ps.renamingIndex,
+      compareMode: ps.compareMode,
+      compareFileIndex: ps.compareFileIndex,
+      comparePickMode: ps.comparePickMode,
+      comparePickTwoMode: ps.comparePickTwoMode,
+      compareLeftIndex: ps.compareLeftIndex,
+      categories: ps.categories,
+      stats: ps.stats,
+      logEntries: ps.logEntries,
+      sessionStartTime: ps.sessionStartTime,
+    });
+  }, [ps.files, ps.currentIndex, ps.sortDestination, ps.viewedPaths, ps.shuffleEnabled,
+      ps.skipViewedEnabled, ps.globalHotkeys, ps.paneDark, ps.viewerDark, ps.isDocked, ps.categories,
+      ps.stats, ps.logEntries,
+      ps.renamingIndex, ps.compareMode, ps.compareFileIndex, ps.comparePickMode,
+      ps.comparePickTwoMode, ps.compareLeftIndex]);
+
+  // Listen for actions from detached playlist window
+  useEffect(() => {
+    if (!window.electronAPI) return;
+    window.electronAPI.onPlaylistAction((action: any) => {
+      switch (action.type) {
+        case 'navigate': ps.navigate(action.direction); break;
+        case 'jumpTo': {
+          ps.jumpTo(action.index);
+          // Also trigger extraction in viewer
+          const file = filesRef.current[action.index];
+          if (file) {
+            indexRef.current = action.index;
+            doExtract(file.fullPath);
+          }
+          break;
+        }
+        case 'setShuffle': ps.setShuffleEnabled(action.value); break;
+        case 'setSkipViewed': ps.setSkipViewedEnabled(action.value); break;
+        case 'setWriteLogs': ps.setWriteLogsEnabled(action.value); break;
+        case 'setGlobalHotkeys': ps.setGlobalHotkeys(action.value); break;
+        case 'setPaneDark': ps.setPaneDark(action.value); break;
+        case 'setViewerDark': ps.handleViewerTheme(action.value); break;
+        case 'toggleDocked': ps.handleToggleDocked(); break;
+        case 'startRenaming': ps.startRenaming(); break;
+        case 'setRenamingIndex': ps.setRenamingIndex(action.value); break;
+        case 'rename': ps.handleRename(action.oldPath, action.newName); break;
+        case 'deleteFiles': ps.handleDeleteFiles(action.paths); break;
+        case 'removeFromPlaylist': ps.handleRemoveFromPlaylist(action.paths); break;
+        case 'compareWithCurrent': ps.startCompareWithFile(action.index); break;
+        case 'cycleComparePick': ps.cycleComparePick(); break;
+        case 'cancelComparePick': ps.cancelComparePick(); break;
+        case 'exitCompare': ps.exitCompare(); break;
+        case 'filesLoaded': {
+          ps.setFiles(action.files);
+          ps.setCurrentIndex(0);
+          ps.setSortDestination(action.sortDestination);
+          ps.setViewedPaths(new Set([action.files[0]?.fullPath].filter(Boolean)));
+          filesRef.current = action.files;
+          indexRef.current = 0;
+          if (action.files[0]) doExtract(action.files[0].fullPath);
+          break;
+        }
+        case 'sort': ps.handleSort(action.categoryId); break;
+        case 'openSettings': setSettingsOpen(true); break;
+        case 'repack': if (images.length > 0) setRepackMode(true); break;
+        case 'filesAppended': {
+          const currentFiles = filesRef.current;
+          const existingPaths = new Set(currentFiles.map((f: FileInfo) => f.fullPath));
+          const newFiles = action.files.filter((f: FileInfo) => !existingPaths.has(f.fullPath));
+          if (newFiles.length > 0) {
+            const combined = [...currentFiles, ...newFiles];
+            ps.setFiles(combined);
+            filesRef.current = combined;
+            if (action.sortDestination) ps.setSortDestination(action.sortDestination);
+          }
+          break;
+        }
+      }
+    });
+  }, [doExtract]);
+
+  const handleAction = useCallback((action: HotkeyAction) => {
+    const viewer = (window as any).__cbzViewer;
+    switch (action) {
+      case 'next-page': viewer?.nextPage(); break;
+      case 'prev-page': viewer?.prevPage(); break;
+      case 'first-page': viewer?.firstPage(); break;
+      case 'last-page': viewer?.lastPage(); break;
+      case 'fullscreen': window.electronAPI?.toggleFullscreen(); break;
+      case 'toggle-playlist': if (ps.isDocked) setPlaylistVisible(v => !v); break;
+      case 'toggle-center': if (showDockedPanel) setCenterPage(c => !c); break;
+      case 'rename': ps.startRenaming(); break;
+      case 'escape':
+        if (ps.compareMode) ps.exitCompare();
+        else if (ps.comparePickMode || ps.comparePickTwoMode) ps.cancelComparePick();
+        else if (ps.renamingIndex !== null) ps.setRenamingIndex(null);
+        break;
+      case 'view-single': viewer?.setViewMode('single'); break;
+      case 'view-dual-ltr': viewer?.setViewMode('dual-ltr'); break;
+      case 'view-dual-rtl': viewer?.setViewMode('dual-rtl'); break;
+      case 'view-scroll': viewer?.setViewMode('scroll'); break;
+      case 'next-file': navigateFile('next'); break;
+      case 'prev-file': navigateFile('prev'); break;
+      case 'random-file': navigateFile('random'); break;
+      case 'clear-log': ps.clearLog(); break;
+      case 'keep': case 'purge': case 'fix': case 'translate':
+      case 'inquire': case 'unreadable':
+        ps.handleSort(action); break;
+      case 'quit':
+        window.electronAPI?.quitApp({
+          paneDark: ps.paneDark, viewerDark: ps.viewerDark,
+          isDocked: ps.isDocked, dockedPanelWidth: panelWidth,
+          playlistVisible, centerPage,
+          writeLogsEnabled: ps.writeLogsEnabled,
+          sessionLog: (ps.sortDestination && ps.writeLogsEnabled) ? {
+            sortDestination: ps.sortDestination,
+            startTime: ps.sessionStartTime,
+            endTime: Date.now(),
+            stats: ps.stats,
+          } : undefined,
+        });
+        break;
+    }
+  }, [navigateFile, ps.handleSort, ps.isDocked, ps.paneDark, ps.viewerDark, ps.compareMode, ps.comparePickMode, ps.comparePickTwoMode, panelWidth, playlistVisible, centerPage]);
+
+  useHotkeys({ onAction: handleAction, includePageNav: true, disabled: settingsOpen });
+
+  const currentFile = ps.files[ps.currentIndex] ?? null;
+  const showDockedPanel = ps.isDocked && playlistVisible;
+  // Center-page offset: shift viewer content left by half the panel width
+  const toggleWidth = ps.isDocked ? 12 : 0;
+  const totalPanelWidth = showDockedPanel ? panelWidth + toggleWidth : (ps.isDocked ? toggleWidth : 0);
+  const centerOffset = centerPage && totalPanelWidth > 0 ? totalPanelWidth / 2 : 0;
+
+  return (
+    <div className="h-full w-full flex transition-colors relative" style={{ backgroundColor: darkMode ? `rgb(${darkBgBrightness},${darkBgBrightness},${darkBgBrightness})` : `rgb(${lightBgBrightness},${lightBgBrightness},${lightBgBrightness})` }}>
+      {/* Viewer area (drop = replace) */}
+      <div ref={viewerDropRef} className="flex-1 min-w-0 relative overflow-hidden">
+        {viewerDragging && (
+          <div className="absolute inset-0 bg-blue-500/20 border-2 border-dashed border-blue-400 flex items-center justify-center z-50">
+            <p className="text-blue-300 text-xl font-semibold">Drop to replace playlist</p>
+          </div>
+        )}
+        {/* Compare Mode */}
+        {ps.compareMode && (compareLeftImages.length === 0 || compareRightImages.length === 0) && (
+          <div className={`h-full flex items-center justify-center ${darkMode ? 'text-zinc-500' : 'text-zinc-600'}`}>
+            <p className="text-sm">Loading files for comparison...</p>
+          </div>
+        )}
+        {ps.compareMode && compareLeftImages.length > 0 && compareRightImages.length > 0 && (
+          <CompareViewer
+            leftImages={compareSwapped ? compareRightImages : compareLeftImages}
+            leftExtractionId={compareSwapped ? compareRightId : compareLeftId}
+            leftName={compareSwapped ? (ps.files[ps.compareFileIndex!]?.name ?? '') : (currentFile?.name ?? '')}
+            rightImages={compareSwapped ? compareLeftImages : compareRightImages}
+            rightExtractionId={compareSwapped ? compareLeftId : compareRightId}
+            rightName={compareSwapped ? (currentFile?.name ?? '') : (ps.files[ps.compareFileIndex!]?.name ?? '')}
+            darkMode={darkMode}
+            onSwap={() => setCompareSwapped(s => !s)}
+            onDeleteLeft={() => {
+              const fileToDelete = compareSwapped ? ps.files[ps.compareFileIndex!] : currentFile;
+              if (fileToDelete) {
+                ps.handleDeleteFiles([fileToDelete.fullPath]);
+                ps.exitCompare();
+              }
+            }}
+            onDeleteRight={() => {
+              const fileToDelete = compareSwapped ? currentFile : ps.files[ps.compareFileIndex!];
+              if (fileToDelete) {
+                ps.handleDeleteFiles([fileToDelete.fullPath]);
+                ps.exitCompare();
+              }
+            }}
+            onExit={ps.exitCompare}
+          />
+        )}
+
+        {/* Repack Mode */}
+        {repackMode && images.length === 0 && (
+          <div className={`h-full flex items-center justify-center ${darkMode ? 'text-zinc-500' : 'text-zinc-600'}`}>
+            <p className="text-sm">Loading file for repack...</p>
+          </div>
+        )}
+        {repackMode && images.length > 0 && currentFile && (
+          <RepackViewer
+            images={images}
+            extractionId={extractionId ?? ''}
+            fileName={currentFile.name}
+            darkMode={darkMode}
+            centerPage={centerPage}
+            dockedPanelWidth={showDockedPanel ? panelWidth : 0}
+            initialColumns={repackColumns}
+            initialPanelWidthPercent={repackPanelWidth}
+            onRepack={async (keepIndices, renames) => {
+              if (!currentFile || !extractionId) return;
+              const result = await window.electronAPI?.repackCbz(currentFile.fullPath, extractionId, keepIndices, renames);
+              if (result?.success) {
+                setRepackMode(false);
+                // Re-extract the repacked file to refresh the viewer
+                doExtract(currentFile.fullPath);
+              } else {
+                alert(`Repack failed: ${result?.error}`);
+              }
+            }}
+            onCancel={() => setRepackMode(false)}
+          />
+        )}
+
+        {/* Normal viewer (hidden during compare/repack) */}
+        {!ps.compareMode && !repackMode && (
+          <>
+            {ps.files.length === 0 && (
+              <div className={`h-full flex items-center justify-center text-center ${darkMode ? 'text-zinc-500' : 'text-zinc-600'}`}>
+                <div>
+                  <p className="text-2xl mb-2">CBZ Sorter v5</p>
+                  <p className="text-sm">Viewer Window</p>
+                  <p className={`text-xs mt-4 ${darkMode ? 'text-zinc-600' : 'text-zinc-500'}`}>
+                    Drop CBZ files or a folder here to start
+                  </p>
+                </div>
+              </div>
+            )}
+            {extracting && (
+              <div className={`h-full flex flex-col items-center justify-center gap-3 ${darkMode ? 'text-zinc-500' : 'text-zinc-600'}`}>
+                <p className="text-sm truncate max-w-md px-4">{extractProgress.status || `Extracting ${currentFile?.name}...`}</p>
+                <div className={`w-64 h-1.5 rounded-full overflow-hidden ${darkMode ? 'bg-zinc-800' : 'bg-zinc-300'}`}>
+                  <div
+                    className="h-full bg-blue-500 rounded-full transition-all duration-200"
+                    style={{ width: `${extractProgress.percent}%` }}
+                  />
+                </div>
+                <p className="text-xs tabular-nums">{extractProgress.percent}%</p>
+              </div>
+            )}
+            {error && !extracting && (
+              <div className="h-full flex items-center justify-center text-red-400">
+                <div className="text-center">
+                  <p className="text-sm mb-1">Failed to open</p>
+                  <p className="text-xs max-w-md">{error}</p>
+                </div>
+              </div>
+            )}
+            {!extracting && !error && images.length > 0 && (
+              <CbzViewer
+                key={extractKey}
+                images={images}
+                extractionId={extractionId ?? '0'}
+                darkMode={darkMode}
+                onNextFile={() => navigateFile('next')}
+                onPrevFile={() => navigateFile('prev')}
+                centerPage={centerPage}
+                centerOffset={centerOffset}
+                onToggleCenter={showDockedPanel ? () => setCenterPage(c => !c) : undefined}
+                controlsHideDelay={controlsHideDelay}
+                controlBarMode={controlBarMode}
+                bgColor={darkMode ? `rgb(${darkBgBrightness},${darkBgBrightness},${darkBgBrightness})` : `rgb(${lightBgBrightness},${lightBgBrightness},${lightBgBrightness})`}
+              />
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Playlist toggle button (visible when docked, thin subtle strip) */}
+      {ps.isDocked && (
+        <button
+          onClick={() => setPlaylistVisible(v => !v)}
+          className={`flex-shrink-0 w-3 h-full flex items-center justify-center transition-all opacity-30 hover:opacity-100 ${darkMode ? 'hover:bg-zinc-700 text-zinc-600 hover:text-zinc-300' : 'hover:bg-zinc-300 text-zinc-400 hover:text-zinc-600'}`}
+          title={`${playlistVisible ? 'Hide' : 'Show'} playlist (F6)`}
+        >
+          <span className="text-[8px]">{playlistVisible ? '▶' : '◀'}</span>
+        </button>
+      )}
+
+      {/* Docked playlist panel (drop = append) */}
+      {showDockedPanel && (
+        <div className="flex-shrink-0 h-full flex" style={{ width: panelWidth }}>
+          {/* Resize handle */}
+          <div
+            className={`w-1 h-full cursor-ew-resize flex-shrink-0 ${darkMode ? 'hover:bg-blue-500/40' : 'hover:bg-blue-400/40'}`}
+            onMouseDown={handlePanelResize}
+          />
+          <div className="flex-1 min-w-0 h-full overflow-hidden">
+            <PlaylistPanel
+              dragging={playlistDragging}
+              dropRef={playlistDropRef}
+              files={ps.files}
+              currentIndex={ps.currentIndex}
+              sortDestination={ps.sortDestination}
+              viewedPaths={ps.viewedPaths}
+              shuffleEnabled={ps.shuffleEnabled}
+              skipViewedEnabled={ps.skipViewedEnabled}
+              globalHotkeys={ps.globalHotkeys}
+              paneDark={ps.paneDark}
+              viewerDark={ps.viewerDark}
+              isDocked={ps.isDocked}
+              categories={ps.categories}
+              stats={ps.stats}
+              logEntries={ps.logEntries}
+              sessionStartTime={ps.sessionStartTime}
+              onSetShuffle={ps.setShuffleEnabled}
+              onSetSkipViewed={ps.setSkipViewedEnabled}
+              writeLogsEnabled={ps.writeLogsEnabled}
+              onSetWriteLogs={ps.setWriteLogsEnabled}
+              onSetGlobalHotkeys={ps.setGlobalHotkeys}
+              onSetPaneDark={ps.setPaneDark}
+              onSetViewerDark={(dark) => ps.handleViewerTheme(dark)}
+              onToggleDocked={ps.handleToggleDocked}
+              onNavigate={(action) => {
+                if (action === 'next') navigateFile('next');
+                else if (action === 'back') navigateFile('prev');
+                else navigateFile('random');
+              }}
+              onJumpTo={(idx) => {
+                ps.setCurrentIndex(idx);
+                indexRef.current = idx;
+                ps.setViewedPaths(prev => new Set(prev).add(filesRef.current[idx]?.fullPath));
+                doExtract(filesRef.current[idx]?.fullPath);
+                window.electronAPI?.broadcastState({ currentIndex: idx });
+              }}
+              renamingIndex={ps.renamingIndex}
+              onSetRenamingIndex={ps.setRenamingIndex}
+              onRename={ps.handleRename}
+              onSort={ps.handleSort}
+              onDeleteFiles={ps.handleDeleteFiles}
+              onRemoveFromPlaylist={ps.handleRemoveFromPlaylist}
+              compareMode={ps.compareMode}
+              comparePickMode={ps.comparePickMode}
+              comparePickTwoMode={ps.comparePickTwoMode}
+              compareLeftIndex={ps.compareLeftIndex}
+              compareFileIndex={ps.compareFileIndex}
+              onCompareWithCurrent={ps.startCompareWithFile}
+              onCycleComparePick={ps.cycleComparePick}
+              onCancelComparePick={ps.cancelComparePick}
+              onOpenSettings={() => setSettingsOpen(true)}
+              onRepack={() => { if (images.length > 0) setRepackMode(true); }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Settings Modal */}
+      <SettingsModal
+        isOpen={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onSaved={() => {
+          // Reload settings from saved config
+          window.electronAPI?.loadConfig().then((cfg: any) => {
+            if (cfg.categories?.length > 0) ps.setCategories(cfg.categories);
+            if (cfg.controlsHideDelay) setControlsHideDelay(cfg.controlsHideDelay);
+            if (cfg.controlBarMode) setControlBarMode(cfg.controlBarMode);
+            if (cfg.darkBgBrightness !== undefined) setDarkBgBrightness(cfg.darkBgBrightness);
+            if (cfg.lightBgBrightness !== undefined) setLightBgBrightness(cfg.lightBgBrightness);
+            if (cfg.repackColumns) setRepackColumns(cfg.repackColumns);
+            if (cfg.repackThumbnailSize) setRepackThumbnailSize(cfg.repackThumbnailSize);
+            if (cfg.repackPanelWidth) setRepackPanelWidth(cfg.repackPanelWidth);
+            (window as any).__cbzSettings = {
+              beepOnLastPage: cfg.beepOnLastPage ?? true,
+              beepVolume: cfg.beepVolume ?? 0.15,
+              beepPitch: cfg.beepPitch ?? 600,
+            };
+          });
+        }}
+        darkMode={darkMode}
+        onLiveBgChange={(dark, light) => {
+          setDarkBgBrightness(dark);
+          setLightBgBrightness(light);
+        }}
+      />
+    </div>
+  );
+}
+
+// ─── Playlist Window (thin IPC client — mirrors viewer state) ──────────────────
+
+function PlaylistWindow() {
+  // All state received from the viewer window via IPC
+  const [state, setState] = useState<any>({
+    files: [], currentIndex: 0, sortDestination: null, viewedPaths: [],
+    shuffleEnabled: false, skipViewedEnabled: false, globalHotkeys: false,
+    paneDark: true, viewerDark: true, isDocked: false,
+    renamingIndex: null, compareMode: false, compareFileIndex: null,
+    comparePickMode: false, comparePickTwoMode: false, compareLeftIndex: null,
+  });
+
+  // Receive state updates from viewer
+  useEffect(() => {
+    if (!window.electronAPI) return;
+    window.electronAPI.onPlaylistStateUpdate((newState: any) => {
+      setState(newState);
+    });
+    // Also handle legacy broadcasts for file loading
+    window.electronAPI.onStateUpdate((s: any) => {
+      // If viewer sends file updates, merge them
+      if (s.files) setState((prev: any) => ({ ...prev, files: s.files, currentIndex: s.currentIndex ?? prev.currentIndex }));
+    });
+  }, []);
+
+  // Helper: send action to viewer
+  const send = useCallback((action: any) => {
+    window.electronAPI?.sendPlaylistAction(action);
+  }, []);
+
+  // Drop on playlist = append (send to viewer to handle)
+  const handleFilesLoaded = useCallback((loadedFiles: FileInfo[], sortDest: string | null) => {
+    send({ type: 'filesAppended', files: loadedFiles, sortDestination: sortDest });
+  }, [send]);
+
+  const { dragging, containerRef } = useDropZone(handleFilesLoaded);
+
+  const handleAction = useCallback((action: HotkeyAction) => {
+    switch (action) {
+      case 'next-file': send({ type: 'navigate', direction: 'next' }); break;
+      case 'prev-file': send({ type: 'navigate', direction: 'back' }); break;
+      case 'random-file': send({ type: 'navigate', direction: 'random' }); break;
+      case 'rename': send({ type: 'startRenaming' }); break;
+      case 'escape':
+        if (state.compareMode) send({ type: 'exitCompare' });
+        else if (state.comparePickMode || state.comparePickTwoMode) send({ type: 'cancelComparePick' });
+        break;
+      case 'quit': window.electronAPI?.quitApp({ paneDark: state.paneDark, viewerDark: state.viewerDark, isDocked: state.isDocked }); break;
+    }
+  }, [send, state.compareMode, state.comparePickMode, state.comparePickTwoMode, state.paneDark, state.viewerDark, state.isDocked]);
+
+  useHotkeys({ onAction: handleAction });
+
+  const viewedPathsSet = React.useMemo(() => new Set(state.viewedPaths || []), [state.viewedPaths]);
+
+  return (
+    <div className="h-full w-full">
+      <PlaylistPanel
+        dragging={dragging}
+        dropRef={containerRef}
+        files={state.files}
+        currentIndex={state.currentIndex}
+        sortDestination={state.sortDestination}
+        viewedPaths={viewedPathsSet}
+        shuffleEnabled={state.shuffleEnabled}
+        skipViewedEnabled={state.skipViewedEnabled}
+        globalHotkeys={state.globalHotkeys}
+        paneDark={state.paneDark}
+        viewerDark={state.viewerDark}
+        categories={state.categories}
+        stats={state.stats}
+        logEntries={state.logEntries}
+        sessionStartTime={state.sessionStartTime}
+        isDocked={state.isDocked}
+        onSetShuffle={(v) => send({ type: 'setShuffle', value: v })}
+        onSetSkipViewed={(v) => send({ type: 'setSkipViewed', value: v })}
+        writeLogsEnabled={state.writeLogsEnabled}
+        onSetWriteLogs={(v) => send({ type: 'setWriteLogs', value: v })}
+        onSetGlobalHotkeys={(v) => send({ type: 'setGlobalHotkeys', value: v })}
+        onSetPaneDark={(v) => send({ type: 'setPaneDark', value: v })}
+        onSetViewerDark={(v) => send({ type: 'setViewerDark', value: v })}
+        onToggleDocked={() => send({ type: 'toggleDocked' })}
+        onNavigate={(dir) => send({ type: 'navigate', direction: dir })}
+        onJumpTo={(idx) => send({ type: 'jumpTo', index: idx })}
+        renamingIndex={state.renamingIndex}
+        onSetRenamingIndex={(idx) => send({ type: 'setRenamingIndex', value: idx })}
+        onRename={(oldPath, newName) => send({ type: 'rename', oldPath, newName })}
+        onSort={(categoryId) => send({ type: 'sort', categoryId })}
+        onDeleteFiles={(paths) => send({ type: 'deleteFiles', paths })}
+        onRemoveFromPlaylist={(paths) => send({ type: 'removeFromPlaylist', paths })}
+        compareMode={state.compareMode}
+        comparePickMode={state.comparePickMode}
+        comparePickTwoMode={state.comparePickTwoMode}
+        compareLeftIndex={state.compareLeftIndex}
+        compareFileIndex={state.compareFileIndex}
+        onCompareWithCurrent={(idx) => send({ type: 'compareWithCurrent', index: idx })}
+        onCycleComparePick={() => send({ type: 'cycleComparePick' })}
+        onCancelComparePick={() => send({ type: 'cancelComparePick' })}
+        onOpenSettings={() => send({ type: 'openSettings' })}
+        onRepack={() => send({ type: 'repack' })}
+      />
+    </div>
+  );
+}
+
+// ─── Root ──────────────────────────────────────────────────────────────────────
+
+export default function App() {
+  const [windowType, setWindowType] = useState<'viewer' | 'playlist' | null>(null);
+
+  useEffect(() => {
+    if (window.electronAPI) {
+      window.electronAPI.getWindowType().then(setWindowType);
+    } else {
+      const hash = window.location.hash;
+      setWindowType(hash === '#playlist' ? 'playlist' : 'viewer');
+    }
+  }, []);
+
+  if (!windowType) return null;
+  return windowType === 'viewer' ? <ViewerWindow /> : <PlaylistWindow />;
+}

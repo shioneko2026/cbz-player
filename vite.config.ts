@@ -17,6 +17,9 @@ export default defineConfig({
     },
   },
   server: {
-    port: 5173,
+    // 5173 (Vite default) sits inside Windows' reserved port range
+    // 5103-5202 (often grabbed by Hyper-V / Docker Desktop), causing EACCES
+    // on bind. 5210 is just outside the range and stays available.
+    port: 5210,
   },
 });

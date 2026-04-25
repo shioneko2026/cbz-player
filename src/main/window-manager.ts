@@ -161,7 +161,7 @@ const preloadPath = path.join(__dirname, 'preload.js');
 
 function getRendererURL(hash: string): string {
   if (isDev) {
-    return `http://localhost:5173/#${hash}`;
+    return `http://localhost:5210/#${hash}`;
   }
   return `file://${path.join(__dirname, '../renderer/index.html')}#${hash}`;
 }

@@ -39,18 +39,18 @@ CBZ Sorter v5 collapses all of that into one window. Sort hotkeys move files to 
 1. Install **Node.js** from [nodejs.org](https://nodejs.org). The LTS version is fine. ⚠ When the installer asks, make sure "Add to PATH" is checked — otherwise the launcher won't find `npm`.
 2. Download or clone this project to a folder on your machine.
 3. Double-click **`install.bat`** in the project folder. This runs `npm install` and pulls in Electron, React, and the archive extractors. First run takes a few minutes.
-4. Done. Launch the app with **`[000-Run CBZ Sorter.bat`**.
+4. Done. Launch the app with **`[000-Run CBZ Player Main.bat`**.
 
-> ⚠ The file named `[000-RunCBZ_Sorter Launcher].bat` is the **legacy v4.1 PowerShell launcher** — leave it alone unless you specifically want the old version. The v5 app is launched by `[000-Run CBZ Sorter.bat` (no "Launcher" in the name).
+> The legacy v4.1 PowerShell launcher, AutoHotKey global-hotkey daemon, and original v4.1 README live in the `Old CBZ Sorter/` subfolder for reference. They're not part of the v5 app — you only need the launcher above.
 
-**Optional — copy-anywhere folder launcher:** `[00-Run_Here].bat` can be copied into any folder containing CBZ files. Double-clicking it launches the app and auto-loads every CBZ in that folder, with the same folder set as the sort destination. Edit the `APP_DIR=` line at the top of the file to match where you installed the app.
+**Optional — copy-anywhere folder launcher:** `[000-Run CBZ Player Here].bat` can be copied into any folder containing CBZ files. Double-clicking it launches the app and auto-loads every CBZ in that folder, with the same folder set as the sort destination. Edit the `APP_DIR=` line at the top of the file to match where you installed the app.
 
 ---
 
 ## How to use
 
 **First time:**
-1. Launch via `[000-Run CBZ Sorter.bat`. Two windows open: the viewer (your main monitor) and the playlist (your secondary monitor — vertical works best). If you only have one monitor, you can dock the playlist into the viewer's right side via the Detach/Dock button in the playlist header.
+1. Launch via `[000-Run CBZ Player Main.bat`. Two windows open: the viewer (your main monitor) and the playlist (your secondary monitor — vertical works best). If you only have one monitor, you can dock the playlist into the viewer's right side via the Detach/Dock button in the playlist header.
 2. Drag a folder containing `.cbz` files onto the viewer. Or drag a single `.cbz`. The playlist fills with everything found, the first file opens, and that folder becomes your sort destination.
 3. Read the file using arrow keys, space, or the on-screen Next button.
 4. When you've decided what to do with the file, press a sort hotkey:
@@ -111,7 +111,7 @@ CBZ Sorter v5 collapses all of that into one window. Sort hotkeys move files to 
 
 **Sort or repack errors with `EXDEV`.** — Shouldn't happen anymore (cross-drive moves fall back to copy+unlink), but if it does, file an issue. Workaround: configure the destination on the same drive as the source.
 
-**The legacy v4.1 PowerShell version opens instead of v5.** — You launched `[000-RunCBZ_Sorter Launcher].bat`. That one's the old version. Use `[000-Run CBZ Sorter.bat` (no "Launcher" in the name).
+**The legacy v4.1 PowerShell version opens instead of v5.** — You launched the old launcher in `Old CBZ Sorter/[000-RunCBZ_Sorter Launcher].bat`. Use `[000-Run CBZ Player Main.bat` in the project root for the v5 app.
 
 **Settings hotkeys interfere with the app's hotkeys.** — Shouldn't happen — the app disables global hotkeys while the Settings modal is open. If it does, file an issue with reproduction steps.
 

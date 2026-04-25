@@ -31,8 +31,9 @@ CBZ Player/
   tsconfig.node.json           # main process TS config
   vite.config.ts
   install.bat                  # npm install wrapper
-  [000-Run CBZ Sorter.bat      # v5 launcher (typecheck + dev mode)
-  [00-Run_Here].bat            # copy-anywhere folder launcher (sets CBZ_SORTER_FOLDER env)
+  [000-Run CBZ Player Main.bat # v5 launcher (typecheck + dev mode)
+  [000-Run CBZ Player Here].bat# copy-anywhere folder launcher (sets CBZ_SORTER_FOLDER env)
+  Old CBZ Sorter/              # archived v4.1 PowerShell+AHK predecessor (reference only)
   src/
     main/                      # Electron main process
       index.ts                 # App entry, ~50 IPC handlers, menu, custom protocol
@@ -83,7 +84,7 @@ npx tsc -p tsconfig.node.json --noEmit
 npx tsc -p tsconfig.json --noEmit --ignoreDeprecations 6.0
 ```
 
-**Auto-load a folder on launch:** set the `CBZ_SORTER_FOLDER` environment variable before starting. The main process scans that folder and pushes the file list to the renderer once both windows finish loading. `[00-Run_Here].bat` uses this pattern.
+**Auto-load a folder on launch:** set the `CBZ_SORTER_FOLDER` environment variable before starting. The main process scans that folder and pushes the file list to the renderer once both windows finish loading. `[000-Run CBZ Player Here].bat` uses this pattern.
 
 **Renderer typecheck has 4 known errors** in `App.tsx` (lines ~587, 1267) and `main.tsx:4` — all pre-date recent feature work and are not regressions from any current development. Don't try to "fix" them as drive-by changes.
 
@@ -181,4 +182,4 @@ Each extraction gets a unique `extractionId` and lives in a named slot. `cbz-ima
 - **Some CBZs fail all extractors** (RAR5, obscure 7z compression methods). Skipped with error log entry; no further fallback.
 - **Per-monitor DPI quirks possible** on multi-monitor setups with mixed scale factors. The Immerse blackouts and the viewer's centering math both have explicit guards (`setBounds` re-assertion, content-width clamping), but new Electron versions occasionally regress display-bounds rounding behavior.
 
-**Untracked legacy artifacts** in the project root: `[001-CBZ_Sorter].ps1`, `[002-CBZSorterGlobalHotKeys].ahk`, `[003-CBZ_Sorter_README].txt`, `[005-v4.1_IMPLEMENTATION_SUMMARY].txt`, `[000-RunCBZ_Sorter Launcher].bat` (legacy v4.1). These are kept for reference. Add to `.gitignore` or move to a `legacy/` subfolder when convenient.
+**Legacy v4.1 artifacts archived in `Old CBZ Sorter/`:** `[000-RunCBZ_Sorter Launcher].bat`, `[001-CBZ_Sorter].ps1`, `[002-CBZSorterGlobalHotKeys].ahk`, `[003-CBZ_Sorter_README].txt`, `[005-v4.1_IMPLEMENTATION_SUMMARY].txt`. Reference only — not part of the v5 build chain.

@@ -37,7 +37,7 @@ function createBlackoutOnDisplay(display: Display): BrowserWindow {
     focusable: false,
     alwaysOnTop: true,
     backgroundColor: '#000000',
-    title: 'CBZ Sorter — Immerse',
+    title: 'CBZ Player — Immerse',
     show: false,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
@@ -178,7 +178,7 @@ export function createViewerWindow(savedBounds?: WindowBounds): BrowserWindow {
     minWidth: 800,
     minHeight: 600,
     backgroundColor: '#000000',
-    title: 'CBZ Sorter v5',
+    title: 'CBZ Player v5',
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,
@@ -224,7 +224,7 @@ export function createPlaylistWindow(savedBounds?: WindowBounds, isDocked?: bool
     x,
     y,
     backgroundColor: '#18181b',
-    title: 'CBZ Sorter v5 — Playlist',
+    title: 'CBZ Player v5 — Playlist',
     show: !isDocked, // Hidden if starting in docked mode
     webPreferences: {
       preload: preloadPath,

@@ -1,7 +1,7 @@
 {
-  "name": "cbz-sorter-v5",
+  "name": "cbz-player-v5",
   "version": "5.0.0",
-  "description": "CBZ comic file sorter with built-in viewer",
+  "description": "CBZ comic reader with built-in playlist, sort hotkeys, side-by-side compare, and in-place repack",
   "main": "dist/main/index.js",
   "scripts": {
     "dev:renderer": "vite",

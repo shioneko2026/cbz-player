@@ -116,7 +116,11 @@ app.whenReady().then(() => {
   }
 
   // ─── Auto-load folder from environment variable ────────────────────────────
-  const autoLoadFolder = process.env.CBZ_SORTER_FOLDER?.replace(/[\\/]+$/, '');
+  // Prefer the new CBZ_PLAYER_FOLDER name; fall back to CBZ_SORTER_FOLDER for
+  // backward compatibility with any external scripts / shortcuts still setting
+  // the old variable.
+  const rawAutoLoad = process.env.CBZ_PLAYER_FOLDER ?? process.env.CBZ_SORTER_FOLDER;
+  const autoLoadFolder = rawAutoLoad?.replace(/[\\/]+$/, '');
   if (autoLoadFolder) {
     // Wait for both windows to finish loading, then send the folder
     viewer.webContents.once('did-finish-load', () => {
@@ -163,7 +167,7 @@ app.whenReady().then(() => {
     {
       label: 'Help',
       submenu: [
-        { label: 'About CBZ Sorter v5', click: () => dialog.showMessageBox({ title: 'CBZ Sorter v5', message: 'CBZ Sorter v5\nElectron + React + Tailwind', type: 'info' }) },
+        { label: 'About CBZ Player v5', click: () => dialog.showMessageBox({ title: 'CBZ Player v5', message: 'CBZ Player v5\nElectron + React + Tailwind', type: 'info' }) },
       ],
     },
   ];

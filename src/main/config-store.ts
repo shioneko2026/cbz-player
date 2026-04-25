@@ -67,11 +67,28 @@ const DEFAULT_CONFIG: AppConfig = {
 };
 
 function getConfigPath(): string {
+  return path.join(app.getPath('userData'), 'cbz-player-config.json');
+}
+
+function getLegacyConfigPath(): string {
+  // Pre-rename filename. Read once on startup and migrate to the new name so
+  // user-saved settings (per-category overrides, window state, etc.) survive
+  // the rename without manual intervention.
   return path.join(app.getPath('userData'), 'cbz-sorter-config.json');
 }
 
 export function loadConfig(): AppConfig {
   const configPath = getConfigPath();
+  const legacyPath = getLegacyConfigPath();
+  // One-shot migration: if the new file doesn't exist but the legacy one does,
+  // copy it across and delete the old one. Self-healing — runs once, then the
+  // legacy file is gone and this branch never triggers again.
+  try {
+    if (!fs.existsSync(configPath) && fs.existsSync(legacyPath)) {
+      fs.copyFileSync(legacyPath, configPath);
+      try { fs.unlinkSync(legacyPath); } catch {}
+    }
+  } catch {}
   try {
     if (fs.existsSync(configPath)) {
       const raw = fs.readFileSync(configPath, 'utf-8');

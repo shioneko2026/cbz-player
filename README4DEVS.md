@@ -1,4 +1,4 @@
-# CBZ Sorter v5 — Developer Reference
+# CBZ Player v5 — Developer Reference
 
 > For the user-facing README, see [README.md](README.md).
 
@@ -14,7 +14,7 @@
 | Build | Vite 8 (renderer), `tsc` (main process), electron-builder (packaging — Phase 11, untested) |
 | Archive extraction | `7zip-bin` (bundled `7za.exe`, ZIP/7z), `node-unrar-js` (RAR via WASM), `yauzl` (in-memory ZIP) |
 | Image serving | Custom Electron `cbz-image://` protocol |
-| Config | Plain JSON via `app.getPath('userData')/cbz-sorter-config.json` |
+| Config | Plain JSON via `app.getPath('userData')/cbz-player-config.json` (auto-migrates from the old `cbz-sorter-config.json` filename on first launch after rename) |
 
 `adm-zip`, `extract-zip`, `node-7z` are in `package.json` but mostly superseded — left in as fallback options.
 
@@ -32,7 +32,7 @@ CBZ Player/
   vite.config.ts
   install.bat                  # npm install wrapper
   [000-Run CBZ Player Main.bat # v5 launcher (typecheck + dev mode)
-  [000-Run CBZ Player Here].bat# copy-anywhere folder launcher (sets CBZ_SORTER_FOLDER env)
+  [000-Run CBZ Player Here].bat# copy-anywhere folder launcher (sets CBZ_PLAYER_FOLDER env)
   Old CBZ Sorter/              # archived v4.1 PowerShell+AHK predecessor (reference only)
   src/
     main/                      # Electron main process
@@ -62,7 +62,7 @@ CBZ Player/
   dist/                        # Compiled output (gitignored)
 ```
 
-The Obsidian vault at `H:\[02-AHW Data]\[Obsidian]\Claude Code Vault\CBZ Sorter\` holds the long-form architecture, decision log, changelog, and flowcharts. There's no in-repo `docs/`, `SPEC.md`, or `README` other than this file pair — the vault is the spec.
+The Obsidian vault at `H:\[02-AHW Data]\[Obsidian]\Claude Code Vault\CBZ Player\` holds the long-form architecture, decision log, changelog, and flowcharts. There's no in-repo `docs/` or `SPEC.md` — the vault plus this file pair are the spec.
 
 ---
 
@@ -84,7 +84,7 @@ npx tsc -p tsconfig.node.json --noEmit
 npx tsc -p tsconfig.json --noEmit --ignoreDeprecations 6.0
 ```
 
-**Auto-load a folder on launch:** set the `CBZ_SORTER_FOLDER` environment variable before starting. The main process scans that folder and pushes the file list to the renderer once both windows finish loading. `[000-Run CBZ Player Here].bat` uses this pattern.
+**Auto-load a folder on launch:** set the `CBZ_PLAYER_FOLDER` environment variable before starting (the legacy name `CBZ_SORTER_FOLDER` is also read for backward compatibility). The main process scans that folder and pushes the file list to the renderer once both windows finish loading. `[000-Run CBZ Player Here].bat` uses this pattern.
 
 **Renderer typecheck has 4 known errors** in `App.tsx` (lines ~587, 1267) and `main.tsx:4` — all pre-date recent feature work and are not regressions from any current development. Don't try to "fix" them as drive-by changes.
 
@@ -92,7 +92,7 @@ npx tsc -p tsconfig.json --noEmit --ignoreDeprecations 6.0
 
 ## Config reference
 
-JSON file at `app.getPath('userData')/cbz-sorter-config.json`. Loaded via shallow-merge over `DEFAULT_CONFIG` in `config-store.ts` — missing keys fall back to defaults, no migrations needed.
+JSON file at `app.getPath('userData')/cbz-player-config.json`. Loaded via shallow-merge over `DEFAULT_CONFIG` in `config-store.ts` — missing keys fall back to defaults, no schema migrations needed. On first launch after the rename from `cbz-sorter-config.json`, the loader auto-migrates: copies the old file to the new name and deletes the old.
 
 | Key | Type | Default | Purpose |
 |---|---|---|---|

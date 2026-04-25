@@ -1,8 +1,8 @@
-# CBZ Sorter v5
+# CBZ Player v5
 
 A built-in CBZ reader with a sorting playlist on the side — read, sort, compare, and repack thousands of comics from one keyboard-driven window, without breaking your reading flow.
 
-![Hero — CBZ Sorter v5 in docked mode, viewer on the left and playlist panel with sort buttons on the right](assets/screenshot-main-view.png)
+![Hero — CBZ Player v5 in docked mode, viewer on the left and playlist panel with sort buttons on the right](assets/screenshot-main-view.png)
 <!-- Replace with actual screenshot before publishing -->
 
 ---
@@ -17,7 +17,7 @@ Then there are the files that need fixing. Some doujins ship with duplicate page
 
 Then there are the duplicates and misnamed companions. You spot `a doujin 2.cbz` sitting alphabetically before `a doujin.cbz` and realize the unnumbered one is actually part 1 — but renaming it means leaving the reader, navigating in your file manager, renaming, going back. By the time you're back you've lost your place.
 
-CBZ Sorter v5 collapses all of that into one window. Sort hotkeys move files to category folders without ever leaving the page you're on. Built-in repack mode lets you delete duplicate pages and re-archive in place. Compare mode opens two CBZs side by side so you can tell which version to keep. F2 renames the current file inline. The reader, the file manager, and the page editor are the same app — and they all listen to the keyboard while you're reading.
+CBZ Player v5 collapses all of that into one window. Sort hotkeys move files to category folders without ever leaving the page you're on. Built-in repack mode lets you delete duplicate pages and re-archive in place. Compare mode opens two CBZs side by side so you can tell which version to keep. F2 renames the current file inline. The reader, the file manager, and the page editor are the same app — and they all listen to the keyboard while you're reading.
 
 ---
 

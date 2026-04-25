@@ -327,7 +327,7 @@ export default function PlaylistPanel(props: PlaylistPanelProps) {
             </>
           ) : (
             <>
-              <p className={`text-lg font-semibold ${t.headerText}`}>CBZ Sorter v5</p>
+              <p className={`text-lg font-semibold ${t.headerText}`}>CBZ Player v5</p>
               <p className={`text-xs ${t.subtitle}`}>Drop files or folder to start</p>
             </>
           )}

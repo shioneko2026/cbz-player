@@ -1036,7 +1036,7 @@ function ViewerWindow() {
             {ps.files.length === 0 && (
               <div className={`h-full flex items-center justify-center text-center ${darkMode ? 'text-zinc-500' : 'text-zinc-600'}`}>
                 <div>
-                  <p className="text-2xl mb-2">CBZ Sorter v5</p>
+                  <p className="text-2xl mb-2">CBZ Player v5</p>
                   <p className="text-sm">Viewer Window</p>
                   <p className={`text-xs mt-4 ${darkMode ? 'text-zinc-600' : 'text-zinc-500'}`}>
                     Drop CBZ files or a folder here to start

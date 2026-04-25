@@ -4,9 +4,13 @@ interface CompareViewerProps {
   leftImages: string[];
   leftExtractionId: string;
   leftName: string;
+  leftFileSize?: number;
+  leftCreatedDate?: string;
   rightImages: string[];
   rightExtractionId: string;
   rightName: string;
+  rightFileSize?: number;
+  rightCreatedDate?: string;
   darkMode: boolean;
   onDeleteLeft?: () => void;
   onDeleteRight?: () => void;
@@ -40,6 +44,7 @@ export default function CompareViewer(props: CompareViewerProps) {
     leftImages, leftExtractionId, leftName,
     rightImages, rightExtractionId, rightName,
     darkMode, onDeleteLeft, onDeleteRight, onSwap, onExit,
+    leftFileSize, leftCreatedDate, rightFileSize, rightCreatedDate,
   } = props;
 
   const [leftPage, setLeftPage] = useState(0);
@@ -148,10 +153,18 @@ export default function CompareViewer(props: CompareViewerProps) {
   const btnActive = darkMode ? 'bg-zinc-700' : 'bg-zinc-300';
   const sideBorder = darkMode ? 'border-zinc-700' : 'border-zinc-400';
 
+  const formatSize = (bytes?: number) => {
+    if (!bytes) return '';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
   const renderSide = (
     images: string[], extractionId: string, name: string,
     page: number, total: number, side: 'left' | 'right',
     onDelete?: () => void,
+    fileSize?: number, createdDate?: string,
   ) => (
     <div
       className={`h-full flex flex-col relative overflow-hidden min-h-0 ${side === 'left' ? `border-r ${sideBorder}` : ''}`}
@@ -159,16 +172,18 @@ export default function CompareViewer(props: CompareViewerProps) {
       onMouseEnter={() => setHoveredSide(side)}
       onWheel={(e) => handleWheel(e, side)}
     >
-      {/* Page counter — bottom, mirrored toward center */}
-      <div className={`absolute bottom-14 z-10 px-3 py-1.5 rounded text-sm font-medium tabular-nums ${side === 'left' ? 'right-3' : 'left-3'} ${darkMode ? 'bg-black/60 text-zinc-200' : 'bg-white/60 text-zinc-700'}`}>
-        {page + 1} / {total}
+      {/* Info block — bottom, mirrored toward center: page count, file size, date */}
+      <div className={`absolute bottom-3 z-10 px-3 py-1.5 rounded ${side === 'left' ? 'right-3 text-right' : 'left-3 text-left'} ${darkMode ? 'bg-black/60 text-zinc-200' : 'bg-white/60 text-zinc-700'}`}>
+        <div className="text-sm font-medium tabular-nums">{page + 1} / {total}</div>
+        {fileSize ? <div className="text-xs tabular-nums opacity-70">{formatSize(fileSize)}</div> : null}
+        {createdDate ? <div className="text-xs opacity-70">{createdDate}</div> : null}
       </div>
 
       {/* Delete button — bottom, mirrored toward center */}
       {onDelete && (
         <button
           onClick={onDelete}
-          className={`absolute bottom-24 z-10 px-3 py-1.5 rounded text-sm font-medium transition-opacity opacity-60 hover:opacity-100 bg-red-700 hover:bg-red-600 text-white ${side === 'left' ? 'right-3' : 'left-3'}`}
+          className={`absolute bottom-20 z-10 px-3 py-1.5 rounded text-sm font-medium transition-opacity opacity-60 hover:opacity-100 bg-red-700 hover:bg-red-600 text-white ${side === 'left' ? 'right-3' : 'left-3'}`}
         >
           Delete {side === 'left' ? 'Left' : 'Right'}
         </button>
@@ -179,6 +194,7 @@ export default function CompareViewer(props: CompareViewerProps) {
       <div className="flex-1 flex items-center justify-center overflow-hidden">
         {images.length > 0 && page < images.length && (
           <img
+            key={`${extractionId}-${images[page]}`}
             src={imageUrl(extractionId, images[page])}
             alt={`Page ${page + 1}`}
             style={getImageStyle()}
@@ -198,17 +214,18 @@ export default function CompareViewer(props: CompareViewerProps) {
     >
       {/* Two-pane view */}
       <div className="flex-1 flex min-h-0">
-        {renderSide(leftImages, leftExtractionId, leftName, leftPage, leftTotal, 'left', onDeleteLeft)}
-        {renderSide(rightImages, rightExtractionId, rightName, rightPage, rightTotal, 'right', onDeleteRight)}
+        {renderSide(leftImages, leftExtractionId, leftName, leftPage, leftTotal, 'left', onDeleteLeft, leftFileSize, leftCreatedDate)}
+        {renderSide(rightImages, rightExtractionId, rightName, rightPage, rightTotal, 'right', onDeleteRight, rightFileSize, rightCreatedDate)}
       </div>
 
       {/* Shared controls bar — absolute overlay, shows on mouse move */}
       <div className={`flex-shrink-0 ${controlsBg} ${controlsText}`}>
-        {/* Filenames row — right-aligned left name | divider | left-aligned right name */}
-        <div className="flex px-4 py-1 gap-2">
-          <span className={`flex-1 text-[10px] text-right break-words leading-tight ${darkMode ? 'text-zinc-500' : 'text-zinc-500'}`} title={leftName}>◀ {leftName}</span>
-          <span className={`w-px flex-shrink-0 ${darkMode ? 'bg-zinc-700' : 'bg-zinc-300'}`} />
-          <span className={`flex-1 text-[10px] text-left break-words leading-tight ${darkMode ? 'text-zinc-500' : 'text-zinc-500'}`} title={rightName}>{rightName} ▶</span>
+        {/* Filenames stacked — centered on screen, left-aligned within the block */}
+        <div className="flex justify-center px-4 py-1">
+          <div className={`text-left max-w-[70%] ${darkMode ? 'text-zinc-500' : 'text-zinc-500'}`}>
+            <div className="text-[10px] leading-tight break-words">◀ {leftName}</div>
+            <div className="text-[10px] leading-tight break-words">▶ {rightName}</div>
+          </div>
         </div>
         {/* Controls row */}
         <div className="flex items-center justify-center gap-4 px-4 py-1.5">

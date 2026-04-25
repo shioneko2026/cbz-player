@@ -3,20 +3,31 @@ import { FileInfo } from '../lib/types';
 
 // ─── Sub-components ────────────────────────────────────────────────────────────
 
-function ThemedToggle({ label, checked, onChange, paneDark }: {
-  label: string; checked: boolean; onChange: (v: boolean) => void; paneDark: boolean;
+function ThemedToggle({ label, checked, onChange, paneDark, disabled, title }: {
+  label: string; checked: boolean; onChange: (v: boolean) => void; paneDark: boolean; disabled?: boolean; title?: string;
 }) {
+  const labelColor = disabled
+    ? 'text-zinc-600'
+    : checked ? (paneDark ? 'text-zinc-200' : 'text-zinc-800') : 'text-zinc-500';
+  const trackColor = disabled
+    ? (paneDark ? 'bg-zinc-800' : 'bg-zinc-300')
+    : checked ? 'bg-blue-600' : (paneDark ? 'bg-zinc-600' : 'bg-zinc-400');
   return (
-    <label className="flex items-center gap-1.5 text-xs cursor-pointer select-none">
+    <label
+      className={`flex items-center gap-1.5 text-xs select-none ${disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}
+      title={title}
+    >
       <button
         role="switch"
         aria-checked={checked}
-        onClick={() => onChange(!checked)}
-        className={`w-8 h-4 rounded-full relative transition-colors ${checked ? 'bg-blue-600' : (paneDark ? 'bg-zinc-600' : 'bg-zinc-400')}`}
+        aria-disabled={disabled}
+        disabled={disabled}
+        onClick={() => { if (!disabled) onChange(!checked); }}
+        className={`w-8 h-4 rounded-full relative transition-colors ${trackColor}`}
       >
         <div className={`w-3 h-3 bg-white rounded-full absolute top-0.5 transition-transform ${checked ? 'translate-x-4' : 'translate-x-0.5'}`} />
       </button>
-      <span className={checked ? (paneDark ? 'text-zinc-200' : 'text-zinc-800') : 'text-zinc-500'}>{label}</span>
+      <span className={labelColor}>{label}</span>
     </label>
   );
 }
@@ -32,6 +43,9 @@ function HighlightedKey({ label, hotkey }: { label: string; hotkey: string }) {
     </>
   );
 }
+
+// Persist log height across component remounts
+let persistedLogHeight = 0;
 
 function formatSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -109,6 +123,8 @@ export interface PlaylistPanelProps {
   onSetGlobalHotkeys: (v: boolean) => void;
   onSetPaneDark: (v: boolean) => void;
   onSetViewerDark: (v: boolean) => void;
+  immerseEnabled?: boolean;
+  onSetImmerse?: (v: boolean) => void;
   onToggleDocked: () => void;
   onNavigate: (action: 'next' | 'back' | 'random') => void;
   onJumpTo: (index: number) => void;
@@ -194,7 +210,24 @@ export default function PlaylistPanel(props: PlaylistPanelProps) {
   }, [selectionMode, exitSelectionMode]);
 
   const playlistRef = useRef<HTMLDivElement>(null);
-  const [logHeight, setLogHeight] = useState(props.initialLogHeight ?? 112);
+  const logPanelRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll log to bottom when new entries arrive
+  useEffect(() => {
+    if (logPanelRef.current) {
+      logPanelRef.current.scrollTop = logPanelRef.current.scrollHeight;
+    }
+  }, [props.logEntries?.length]);
+  const [logHeight, _setLogHeight] = useState(persistedLogHeight || props.initialLogHeight || 112);
+  const setLogHeight = (h: number | ((prev: number) => number)) => {
+    _setLogHeight(prev => {
+      const val = typeof h === 'function' ? h(prev) : h;
+      persistedLogHeight = val;
+      // Save to config so it persists across restarts
+      (window as any).electronAPI?.saveUiState({ logHeight: val });
+      return val;
+    });
+  };
 
   // Resizable log panel
   const handleLogResize = useCallback((e: React.MouseEvent) => {
@@ -324,6 +357,14 @@ export default function PlaylistPanel(props: PlaylistPanelProps) {
         <div className={`w-full border-t ${t.border} my-1`} />
         <ThemedToggle label="Pane Light" checked={!paneDark} onChange={(v) => onSetPaneDark(!v)} paneDark={paneDark} />
         <ThemedToggle label="Viewer Light" checked={!viewerDark} onChange={(v) => onSetViewerDark(!v)} paneDark={paneDark} />
+        <ThemedToggle
+          label="Immerse"
+          checked={props.immerseEnabled ?? false}
+          onChange={(v) => props.onSetImmerse?.(v)}
+          paneDark={paneDark}
+          disabled={!isDocked}
+          title={isDocked ? 'Black out every monitor except the viewer' : 'Immerse requires docked playlist'}
+        />
       </div>
 
       {/* Sort Buttons */}
@@ -394,7 +435,9 @@ export default function PlaylistPanel(props: PlaylistPanelProps) {
               const isRenaming = renamingIndex === idx;
               const isSelected = selectedPaths.has(file.fullPath);
               const isCompareLeft = comparePickTwoMode && compareLeftIndex === idx;
-              const isComparing = compareMode && (idx === currentIndex || idx === compareFileIndex);
+              // In compare mode, "left" is compareLeftIndex (pick-two) or currentIndex (pick-one).
+              const compareLeftIdx = compareLeftIndex ?? currentIndex;
+              const isComparing = compareMode && (idx === compareLeftIdx || idx === compareFileIndex);
               return (
                 <div
                   key={file.fullPath}
@@ -568,7 +611,7 @@ export default function PlaylistPanel(props: PlaylistPanelProps) {
           className={`absolute top-0 left-0 right-0 h-1.5 cursor-ns-resize z-10 ${paneDark ? 'hover:bg-blue-500/30' : 'hover:bg-blue-400/30'}`}
           onMouseDown={handleLogResize}
         />
-        <div className={`border-t ${t.border} ${t.logBg} h-full overflow-y-auto px-3 py-2`}>
+        <div ref={logPanelRef} className={`border-t ${t.border} ${t.logBg} h-full overflow-y-auto px-3 py-2`}>
           {(!props.logEntries || props.logEntries.length === 0) ? (
             <p className={`text-xs ${t.empty}`}>Log output will appear here</p>
           ) : (

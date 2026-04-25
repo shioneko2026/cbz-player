@@ -2,6 +2,7 @@ export interface FileInfo {
   name: string;
   fullPath: string;
   sizeBytes: number;
+  createdDate?: string;
 }
 
 export interface AppState {

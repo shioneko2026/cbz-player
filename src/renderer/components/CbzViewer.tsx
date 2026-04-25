@@ -18,18 +18,27 @@ interface CbzViewerProps {
   bgColor?: string;
 }
 
-// Retry loading broken images (race condition during rapid extraction)
+// Retry loading broken images (race condition during rapid extraction).
+// Since the <img> no longer uses `key`, the same DOM element is reused across
+// page navigation — which means a pending retry setTimeout could fire after the
+// user has already moved to a different page, overwriting React's fresh src
+// with a stale retry URL. Guard by checking that the element's current src
+// still matches the URL that originally failed before retrying.
 function useImageRetry(maxRetries = 3, delay = 300) {
   const retryCountRef = React.useRef<Map<string, number>>(new Map());
 
   const handleError = React.useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
     const img = e.currentTarget;
-    const src = img.src;
-    const count = retryCountRef.current.get(src) ?? 0;
+    const failedSrc = img.src;
+    const count = retryCountRef.current.get(failedSrc) ?? 0;
     if (count < maxRetries) {
-      retryCountRef.current.set(src, count + 1);
+      retryCountRef.current.set(failedSrc, count + 1);
       setTimeout(() => {
-        img.src = src + (src.includes('?') ? '&' : '?') + `retry=${count + 1}`;
+        // Only retry if the element is still pointing at the URL that failed.
+        // If React has since re-rendered a new src (user navigated), skip.
+        if (img.src === failedSrc) {
+          img.src = failedSrc + (failedSrc.includes('?') ? '&' : '?') + `retry=${count + 1}`;
+        }
       }, delay);
     }
   }, [maxRetries, delay]);
@@ -46,6 +55,10 @@ export default function CbzViewer({ images, extractionId, darkMode, onPageChange
   const [viewMode, setViewMode] = useState<ViewMode>('single');
   const [fitMode, setFitMode] = useState<FitMode>('fit-page');
   const [currentPage, setCurrentPage] = useState(0);
+  // Page actually rendered in the DOM. Lags currentPage by one decode cycle so
+  // the <img> never shows a partially-loaded state. Updates only after the
+  // target page(s) have been decoded into Chromium's image cache.
+  const [displayedPage, setDisplayedPage] = useState(0);
   const [zoom, setZoom] = useState(1);
   const [showControls, setShowControls] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -98,7 +111,7 @@ export default function CbzViewer({ images, extractionId, darkMode, onPageChange
     const resizeObs = new ResizeObserver(measure);
     resizeObs.observe(el);
     return () => { observer.disconnect(); resizeObs.disconnect(); };
-  }, [images, currentPage, viewMode]);
+  }, [images, displayedPage, viewMode]);
 
   const clampedOffset = (() => {
     if (!centerOffset) return 0;
@@ -151,9 +164,62 @@ export default function CbzViewer({ images, extractionId, darkMode, onPageChange
     }
   }, [currentPage, totalPages, isDual, beepOnLastPage, beepVolume, beepPitch]);
 
+  // Decode-before-swap: before committing a page change into the DOM, decode
+  // the target page(s) via an offscreen Image() so the visible <img>'s src
+  // flips to an already-cached bitmap. Browser can render it the same frame —
+  // no black flash, no partial state.
+  // For dual-page mode, decode both left and right together (Promise.all) so
+  // they swap in lockstep and never tear (one side advancing before the other).
+  useEffect(() => {
+    if (viewMode === 'scroll') {
+      // Scroll mode mounts every page; no staged swap needed.
+      if (displayedPage !== currentPage) setDisplayedPage(currentPage);
+      return;
+    }
+    if (currentPage === displayedPage) return;
+    if (!images.length || !images[currentPage] || !extractionId) return;
+    let cancelled = false;
+
+    const isDualMode = viewMode === 'dual-rtl' || viewMode === 'dual-ltr';
+    const toDecode: number[] = [currentPage];
+    if (isDualMode && currentPage + 1 < images.length) toDecode.push(currentPage + 1);
+
+    Promise.all(
+      toDecode.map(idx => {
+        const img = new Image();
+        img.src = `cbz-image://host/${extractionId}/${images[idx]}`;
+        // Swallow decode errors — we still commit the page so the visible
+        // <img>'s onError path (useImageRetry) can take over as normal.
+        return img.decode().catch(() => {});
+      })
+    ).then(() => {
+      if (!cancelled) setDisplayedPage(currentPage);
+    });
+
+    return () => { cancelled = true; };
+  }, [currentPage, displayedPage, images, viewMode, extractionId]);
+
+  // Preload neighbors (±3 pages) into the browser's image cache so future
+  // navigation hits a decoded bitmap and the decode-before-swap effect above
+  // resolves in microseconds. ±3 covers both single and dual nav patterns.
+  useEffect(() => {
+    if (viewMode === 'scroll' || !images.length || !extractionId) return;
+    for (let d = -3; d <= 3; d++) {
+      if (d === 0) continue;
+      const idx = currentPage + d;
+      if (idx < 0 || idx >= images.length) continue;
+      const img = new Image();
+      img.src = `cbz-image://host/${extractionId}/${images[idx]}`;
+      // Fire and forget — decoded bitmap enters Chromium's image cache
+      // keyed by URL. No explicit cleanup needed; React GCs the Image refs.
+      img.decode().catch(() => {});
+    }
+  }, [currentPage, images, viewMode, extractionId]);
+
   // Reset page when images change
   useEffect(() => {
     setCurrentPage(0);
+    setDisplayedPage(0);
     setZoom(1);
     resetRetries();
     lastPageBeeped.current = false;
@@ -259,10 +325,15 @@ export default function CbzViewer({ images, extractionId, darkMode, onPageChange
   const btnBase = `px-2 py-1 rounded text-xs transition-colors ${darkMode ? 'hover:bg-zinc-700' : 'hover:bg-zinc-200'}`;
   const btnActive = darkMode ? 'bg-zinc-700' : 'bg-zinc-300';
 
-  // Dual page rendering — offset applied to wrapper, not individual images
+  // Dual page rendering — offset applied to wrapper, not individual images.
+  // Uses displayedPage (not currentPage) so left/right advance together only
+  // after decode-before-swap has committed the page change.
+  // `key` is NOT set on the <img> elements — we want React to keep the same
+  // DOM nodes across page transitions. The decode-before-swap effect above
+  // ensures src is only updated to already-decoded URLs.
   const renderDualPages = () => {
-    const leftIdx = viewMode === 'dual-rtl' ? currentPage + 1 : currentPage;
-    const rightIdx = viewMode === 'dual-rtl' ? currentPage : currentPage + 1;
+    const leftIdx = viewMode === 'dual-rtl' ? displayedPage + 1 : displayedPage;
+    const rightIdx = viewMode === 'dual-rtl' ? displayedPage : displayedPage + 1;
     // Remove position/left from individual image styles for dual mode
     const baseStyle = getImageStyle();
     const imgStyle = { ...baseStyle, maxWidth: '49%', position: undefined as any, left: undefined as any };
@@ -273,11 +344,11 @@ export default function CbzViewer({ images, extractionId, darkMode, onPageChange
         style={clampedOffset ? { position: 'relative', left: `${clampedOffset}px` } : undefined}
       >
         {leftIdx >= 0 && leftIdx < totalPages && (
-          <img key={images[leftIdx]} src={imageUrl(images[leftIdx])} alt={`Page ${leftIdx + 1}`} style={imgStyle} draggable={false}
+          <img src={imageUrl(images[leftIdx])} alt={`Page ${leftIdx + 1}`} style={imgStyle} draggable={false}
             onError={handleImgError} />
         )}
         {rightIdx >= 0 && rightIdx < totalPages && (
-          <img key={images[rightIdx]} src={imageUrl(images[rightIdx])} alt={`Page ${rightIdx + 1}`} style={imgStyle} draggable={false}
+          <img src={imageUrl(images[rightIdx])} alt={`Page ${rightIdx + 1}`} style={imgStyle} draggable={false}
             onError={handleImgError} />
         )}
       </div>
@@ -299,11 +370,10 @@ export default function CbzViewer({ images, extractionId, darkMode, onPageChange
     >
       {/* Image Display */}
       <div ref={imageAreaRef} className="flex-1 flex items-center justify-center overflow-hidden">
-        {viewMode === 'single' && (
+        {viewMode === 'single' && images[displayedPage] && (
           <img
-            key={images[currentPage]}
-            src={imageUrl(images[currentPage])}
-            alt={`Page ${currentPage + 1}`}
+            src={imageUrl(images[displayedPage])}
+            alt={`Page ${displayedPage + 1}`}
             style={getImageStyle()}
             draggable={false}
             onError={handleImgError}

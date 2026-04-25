@@ -1,10 +1,18 @@
 import fs from 'fs';
 import path from 'path';
 
+/**
+ * Long-path-safe wrapper for any fs operation that takes a user-supplied path.
+ * On Windows, prefixes with \\?\ (via path.toNamespacedPath) so fs bypasses the
+ * default MAX_PATH = 260 limit that ANSI APIs enforce. No-op on other platforms.
+ */
+const nsp = (p: string): string => path.toNamespacedPath(p);
+
 export interface FileInfo {
   name: string;
   fullPath: string;
   sizeBytes: number;
+  createdDate?: string;
 }
 
 export interface CategoryConfig {
@@ -16,6 +24,10 @@ export interface CategoryConfig {
   parentCategory?: string;
   dupeFolderName?: string;
   isPurge?: boolean;
+  // Optional per-category override — parent directory where this category's
+  // folder is created. When set, wins over the global useSourceFolder /
+  // customOutputFolder default. Empty/undefined = use global default.
+  outputPath?: string;
 }
 
 export const DEFAULT_CATEGORIES: CategoryConfig[] = [
@@ -31,20 +43,21 @@ export const DEFAULT_CATEGORIES: CategoryConfig[] = [
  * Scan a folder for .cbz files, sorted alphabetically (natural sort).
  */
 export function scanForCbzFiles(folderPath: string): FileInfo[] {
-  if (!fs.existsSync(folderPath)) return [];
+  if (!fs.existsSync(nsp(folderPath))) return [];
 
-  const entries = fs.readdirSync(folderPath, { withFileTypes: true });
+  const entries = fs.readdirSync(nsp(folderPath), { withFileTypes: true });
   const cbzFiles: FileInfo[] = [];
 
   for (const entry of entries) {
     if (entry.isFile() && entry.name.toLowerCase().endsWith('.cbz')) {
       const fullPath = path.join(folderPath, entry.name);
       try {
-        const stat = fs.statSync(fullPath);
+        const stat = fs.statSync(nsp(fullPath));
         cbzFiles.push({
           name: entry.name,
           fullPath,
           sizeBytes: stat.size,
+          createdDate: stat.birthtime.toISOString().split('T')[0],
         });
       } catch {
         // Skip files we can't stat
@@ -67,12 +80,13 @@ export function getFileInfoFromPaths(filePaths: string[]): FileInfo[] {
   for (const fp of filePaths) {
     if (!fp.toLowerCase().endsWith('.cbz')) continue;
     try {
-      const stat = fs.statSync(fp);
+      const stat = fs.statSync(nsp(fp));
       if (stat.isFile()) {
         cbzFiles.push({
           name: path.basename(fp),
           fullPath: fp,
           sizeBytes: stat.size,
+          createdDate: stat.birthtime.toISOString().split('T')[0],
         });
       }
     } catch {
@@ -98,6 +112,22 @@ export function detectSortDestination(filePaths: string[]): string | null {
 }
 
 /**
+ * Pick the parent directory where this category's subfolder should be created.
+ * Precedence: per-category outputPath override > global customOutputFolder > source dir.
+ */
+export function resolveCategoryBasePath(
+  category: CategoryConfig,
+  useSourceFolder: boolean,
+  customOutputFolder: string,
+  sourceDirFallback: string,
+): string {
+  const override = category.outputPath?.trim();
+  if (override) return override;
+  if (!useSourceFolder && customOutputFolder) return customOutputFolder;
+  return sourceDirFallback;
+}
+
+/**
  * Move a file to a sort category folder. Handles dupe detection.
  * Returns { moved: true, destPath, isDupe } or throws on error.
  */
@@ -107,13 +137,27 @@ export function sortFile(
   category: CategoryConfig,
   categories: CategoryConfig[],
 ): { destPath: string; isDupe: boolean } {
-  if (!fs.existsSync(filePath)) {
+  if (!fs.existsSync(nsp(filePath))) {
     throw new Error(`Source file not found: ${path.basename(filePath)}`);
   }
 
-  // Resolve destination folder
+  // If the base folder sits on a drive that isn't currently mounted, fail
+  // loudly up front rather than letting mkdir create ghost paths on
+  // another drive. Drive roots are always short (3 chars) so they never
+  // need the \\?\ long-path prefix — and more importantly, that prefix
+  // makes existsSync return false for mounted drive roots on Windows.
+  // Use the plain path here, not nsp().
+  const baseRoot = path.parse(baseFolder).root;
+  if (baseRoot && !fs.existsSync(baseRoot)) {
+    throw new Error(`Drive ${baseRoot} is not available — cannot sort to ${baseFolder}`);
+  }
+
+  // Resolve destination folder. An explicit per-category override skips parent
+  // nesting — the override IS the intended parent, so don't bury the subfolder
+  // under the parent category's folder on top of it.
+  const hasOverride = !!category.outputPath?.trim();
   let destFolder: string;
-  if (category.parentCategory) {
+  if (category.parentCategory && !hasOverride) {
     const parent = categories.find(c => c.id === category.parentCategory);
     if (parent && parent.folderName) {
       destFolder = path.join(baseFolder, parent.folderName, category.folderName);
@@ -125,8 +169,8 @@ export function sortFile(
   }
 
   // Ensure destination exists
-  if (!fs.existsSync(destFolder)) {
-    fs.mkdirSync(destFolder, { recursive: true });
+  if (!fs.existsSync(nsp(destFolder))) {
+    fs.mkdirSync(nsp(destFolder), { recursive: true });
   }
 
   const fileName = path.basename(filePath);
@@ -134,29 +178,40 @@ export function sortFile(
   let isDupe = false;
 
   // Check for dupe
-  if (fs.existsSync(destPath)) {
+  if (fs.existsSync(nsp(destPath))) {
     isDupe = true;
     if (category.dupeFolderName) {
       // Redirect to dupe folder
       const dupeFolder = path.join(baseFolder, category.dupeFolderName);
-      if (!fs.existsSync(dupeFolder)) {
-        fs.mkdirSync(dupeFolder, { recursive: true });
+      if (!fs.existsSync(nsp(dupeFolder))) {
+        fs.mkdirSync(nsp(dupeFolder), { recursive: true });
       }
       destPath = path.join(dupeFolder, fileName);
       // If dupe folder also has the file, add timestamp
-      if (fs.existsSync(destPath)) {
+      if (fs.existsSync(nsp(destPath))) {
         const ext = path.extname(fileName);
         const base = path.basename(fileName, ext);
         destPath = path.join(dupeFolder, `${base}_${Date.now()}${ext}`);
       }
     } else {
       // No dupe folder defined — force replace (for Inquire/Unreadable)
-      fs.unlinkSync(destPath);
+      fs.unlinkSync(nsp(destPath));
     }
   }
 
-  // Move the file
-  fs.renameSync(filePath, destPath);
+  // Move the file. renameSync fails with EXDEV across drives on Windows, so
+  // fall back to copy+unlink in that one case (matches the repack handler's
+  // approach for its temp-to-final move).
+  try {
+    fs.renameSync(nsp(filePath), nsp(destPath));
+  } catch (err: any) {
+    if (err?.code === 'EXDEV') {
+      fs.copyFileSync(nsp(filePath), nsp(destPath));
+      fs.unlinkSync(nsp(filePath));
+    } else {
+      throw err;
+    }
+  }
   return { destPath, isDupe };
 }
 
@@ -167,15 +222,15 @@ export function renameFile(oldPath: string, newName: string): FileInfo {
   const dir = path.dirname(oldPath);
   const newPath = path.join(dir, newName);
 
-  if (fs.existsSync(newPath)) {
+  if (fs.existsSync(nsp(newPath))) {
     throw new Error(`File already exists: ${newName}`);
   }
-  if (!fs.existsSync(oldPath)) {
+  if (!fs.existsSync(nsp(oldPath))) {
     throw new Error(`Source file not found: ${path.basename(oldPath)}`);
   }
 
-  fs.renameSync(oldPath, newPath);
-  const stat = fs.statSync(newPath);
+  fs.renameSync(nsp(oldPath), nsp(newPath));
+  const stat = fs.statSync(nsp(newPath));
   return { name: newName, fullPath: newPath, sizeBytes: stat.size };
 }
 
@@ -198,8 +253,8 @@ export function ensureSortFolders(baseFolder: string, categories: CategoryConfig
       targetDir = path.join(baseFolder, cat.folderName);
     }
 
-    if (!fs.existsSync(targetDir)) {
-      fs.mkdirSync(targetDir, { recursive: true });
+    if (!fs.existsSync(nsp(targetDir))) {
+      fs.mkdirSync(nsp(targetDir), { recursive: true });
     }
   }
 }

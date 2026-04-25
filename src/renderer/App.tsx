@@ -26,10 +26,10 @@ declare global {
       sortFile: (filePath: string, categoryId: string, sortDest: string) => Promise<{ success: boolean; isDupe?: boolean; error?: string; action?: string }>;
       renameFile: (oldPath: string, newName: string) => Promise<{ success: boolean; file: FileInfo | null; error: string | null }>;
       trashFiles: (paths: string[]) => Promise<{ path: string; success: boolean }[]>;
-      extractCbz: (cbzPath: string, slot?: string) => Promise<{ images: string[]; extractionId: string | null; error: string | null }>;
+      extractCbz: (cbzPath: string, slot?: string) => Promise<{ images: string[]; imageNames?: string[]; extractionId: string | null; topLevelFolder?: string; error: string | null }>;
       cleanupCbz: (slot?: string) => Promise<void>;
       onExtractionProgress: (callback: (progress: { percent: number; status: string }) => void) => void;
-      repackCbz: (originalPath: string, slot: string, keepIndices: number[], renames: Record<string, string>) => Promise<{ success: boolean; error?: string }>;
+      repackCbz: (originalPath: string, slot: string, keepIndices: number[], renames: Record<string, string>, folderName?: string, newFileName?: string) => Promise<{ success: boolean; error?: string; newPath?: string }>;
       loadSettings: () => Promise<any>;
       saveSettings: (settings: any) => Promise<{ success: boolean }>;
       onMenuAction: (callback: (action: string) => void) => void;
@@ -148,6 +148,10 @@ function usePlaylistState() {
   const [paneDark, setPaneDark] = useState(true);
   const [viewerDark, setViewerDark] = useState(true);
   const [isDocked, setIsDocked] = useState(false);
+  // Immerse mode is per-session — never persisted, always initializes to false.
+  // Toggle is grayed out when !isDocked; detaching auto-disables it (main
+  // process both tears down blackouts and broadcasts immerse:changed=false).
+  const [immerseEnabled, setImmerseEnabledState] = useState(false);
   const [renamingIndex, setRenamingIndex] = useState<number | null>(null);
   const currentIndexRef = useRef(0);
   useEffect(() => { currentIndexRef.current = currentIndex; }, [currentIndex]);
@@ -187,7 +191,7 @@ function usePlaylistState() {
   const addLog = useCallback((text: string, color: string, emoji: string) => {
     const now = new Date();
     const time = now.toLocaleTimeString('en-US', { hour12: false });
-    setLogEntries(prev => [{ time, text, color, emoji }, ...prev].slice(0, 500));
+    setLogEntries(prev => [...prev, { time, text, color, emoji }].slice(-500));
   }, []);
 
   const incrementStat = useCallback((key: keyof SessionStats) => {
@@ -255,7 +259,7 @@ function usePlaylistState() {
         unreadable: { color: 'text-rose-400',    emoji: '⚠️', stat: 'unreadable', label: 'Unreadable' },
       };
       const info = logMap[categoryId];
-      if (info && writeLogsEnabled) {
+      if (info) {
         const pos = `[${currentIndexRef.current + 1}/${files.length}]`;
         addLog(`${pos} ${info.label}: ${file.name}${result.isDupe ? ' (dupe)' : ''}`, info.color, info.emoji);
         incrementStat(info.stat);
@@ -282,6 +286,18 @@ function usePlaylistState() {
     }
   }, [files, sortDestination, isProcessing]);
 
+  // After a list mutation, keep currentIndex pointing at the same file (or clamp if it was removed).
+  const reconcileCurrentIndex = useCallback((prev: FileInfo[], updated: FileInfo[]): number => {
+    const oldIdx = currentIndexRef.current;
+    const oldFile = prev[oldIdx];
+    if (oldFile) {
+      const found = updated.findIndex(f => f.fullPath === oldFile.fullPath);
+      if (found >= 0) return found;
+    }
+    if (updated.length === 0) return 0;
+    return Math.min(oldIdx, updated.length - 1);
+  }, []);
+
   const handleDeleteFiles = useCallback(async (paths: string[]) => {
     if (!window.electronAPI || paths.length === 0) return;
     const results = await window.electronAPI.trashFiles(paths);
@@ -289,20 +305,30 @@ function usePlaylistState() {
     if (deleted.size > 0) {
       setFiles(prev => {
         const updated = prev.filter(f => !deleted.has(f.fullPath));
-        window.electronAPI?.broadcastState({ files: updated });
+        const newIdx = reconcileCurrentIndex(prev, updated);
+        if (newIdx !== currentIndexRef.current) {
+          setCurrentIndex(newIdx);
+          currentIndexRef.current = newIdx;
+        }
+        window.electronAPI?.broadcastState({ files: updated, currentIndex: newIdx });
         return updated;
       });
     }
-  }, []);
+  }, [reconcileCurrentIndex]);
 
   const handleRemoveFromPlaylist = useCallback((paths: string[]) => {
     const toRemove = new Set(paths);
     setFiles(prev => {
       const updated = prev.filter(f => !toRemove.has(f.fullPath));
-      window.electronAPI?.broadcastState({ files: updated });
+      const newIdx = reconcileCurrentIndex(prev, updated);
+      if (newIdx !== currentIndexRef.current) {
+        setCurrentIndex(newIdx);
+        currentIndexRef.current = newIdx;
+      }
+      window.electronAPI?.broadcastState({ files: updated, currentIndex: newIdx });
       return updated;
     });
-  }, []);
+  }, [reconcileCurrentIndex]);
 
   // Compare mode: compare a file with the current file
   const startCompareWithFile = useCallback((fileIndex: number) => {
@@ -312,13 +338,13 @@ function usePlaylistState() {
       } else {
         // Can't compare a file with itself
         if (fileIndex === compareLeftIndex) return;
-        setCurrentIndex(compareLeftIndex);
-        currentIndexRef.current = compareLeftIndex;
+        // Keep compareLeftIndex set — renderer uses it as the "left" file in pick-two.
+        // Do NOT mutate currentIndex — user expects it to point to their original
+        // viewing position after compare exits.
         setCompareFileIndex(fileIndex);
         setCompareMode(true);
         setComparePickMode(false);
         setComparePickTwoMode(false);
-        setCompareLeftIndex(null);
       }
       return;
     }
@@ -328,6 +354,16 @@ function usePlaylistState() {
     setCompareMode(true);
     setComparePickMode(false);
   }, [comparePickTwoMode, compareLeftIndex]);
+
+  // Hotkey entry: go straight to "Pick with current" state. No-op if already
+  // in any compare state (pick-one, pick-two, or active compare) so a repeated
+  // keypress doesn't reset progress.
+  const enterComparePickMode = useCallback(() => {
+    if (compareMode || comparePickMode || comparePickTwoMode) return;
+    setComparePickMode(true);
+    setComparePickTwoMode(false);
+    setCompareLeftIndex(null);
+  }, [compareMode, comparePickMode, comparePickTwoMode]);
 
   // Cycle: Off → Pick with current → Pick two → Off
   const cycleComparePick = useCallback(() => {
@@ -365,10 +401,45 @@ function usePlaylistState() {
     window.electronAPI?.cleanupCbz('compare-right');
   }, []);
 
+  // Ctrl+Alt+S: physically reshuffle the playlist. Current file becomes index 0,
+  // everything else Fisher-Yates-shuffled into indices 1..N. Viewed state is
+  // keyed by fullPath so dimming carries across. Broadcast so the detached
+  // playlist window updates too.
+  //
+  // Reads `files` + `currentIndex` directly from state rather than refs —
+  // useNavigation.jumpTo only calls setCurrentIndex (no immediate ref sync),
+  // so currentIndexRef lags by one render after a playlist click, which made
+  // this function always pin files[0] instead of the actually-viewed file.
+  const randomizePlaylist = useCallback(() => {
+    if (files.length <= 1) return;
+    const idx = currentIndex;
+    const current = files[idx];
+    const rest = files.filter((_, i) => i !== idx);
+    // Fisher-Yates on the rest
+    for (let i = rest.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [rest[i], rest[j]] = [rest[j], rest[i]];
+    }
+    const updated = current ? [current, ...rest] : rest;
+    setFiles(updated);
+    setCurrentIndex(0);
+    currentIndexRef.current = 0;
+    window.electronAPI?.broadcastState({ files: updated, currentIndex: 0 });
+  }, [files, currentIndex]);
+
   const handleToggleDocked = useCallback(() => {
     const newDocked = !isDocked;
     setIsDocked(newDocked);
     window.electronAPI?.setDockedMode(newDocked);
+  }, [isDocked]);
+
+  // Immerse toggle setter — only effective while docked. Main process also
+  // force-disables on detach (layout:set-docked handler calls setImmerseEnabled
+  // false + broadcasts immerse:changed), so a stale `true` can't linger.
+  const setImmerseEnabled = useCallback((enabled: boolean) => {
+    if (enabled && !isDocked) return; // safety: don't enable while detached
+    setImmerseEnabledState(enabled);
+    (window.electronAPI as any)?.setImmerseEnabled?.(enabled);
   }, [isDocked]);
 
   // Listen for docked mode changes from other window
@@ -377,16 +448,26 @@ function usePlaylistState() {
     window.electronAPI.onDockedModeChanged((docked) => setIsDocked(docked));
   }, []);
 
+  // Listen for immerse state broadcasts (fires when main force-disables on
+  // detach so the renderer's toggle reflects reality).
+  useEffect(() => {
+    const api = window.electronAPI as any;
+    if (!api?.onImmerseChanged) return;
+    api.onImmerseChanged((enabled: boolean) => setImmerseEnabledState(enabled));
+  }, []);
+
   return {
     files, setFiles, currentIndex, setCurrentIndex, sortDestination, setSortDestination,
     shuffleEnabled, setShuffleEnabled, skipViewedEnabled, setSkipViewedEnabled,
     globalHotkeys, setGlobalHotkeys, viewedPaths, setViewedPaths,
     paneDark, setPaneDark, viewerDark, setViewerDark, isDocked,
+    immerseEnabled, setImmerseEnabled,
     renamingIndex, setRenamingIndex, startRenaming, handleRename,
     handleSort, isProcessing,
     handleDeleteFiles, handleRemoveFromPlaylist,
     compareMode, compareFileIndex, comparePickMode, comparePickTwoMode, compareLeftIndex,
-    startCompareWithFile, cycleComparePick, cancelComparePick, exitCompare,
+    startCompareWithFile, cycleComparePick, cancelComparePick, exitCompare, enterComparePickMode,
+    randomizePlaylist,
     categories, setCategories,
     writeLogsEnabled, setWriteLogsEnabled,
     stats, logEntries, sessionStartTime, addLog, incrementStat, clearLog,
@@ -399,12 +480,15 @@ function usePlaylistState() {
 function ViewerWindow() {
   const [darkMode, setDarkMode] = useState(true);
   const [images, setImages] = useState<string[]>([]);
+  const [imageNames, setImageNames] = useState<string[]>([]);
+  const [topLevelFolder, setTopLevelFolder] = useState<string>('');
   const [extractionId, setExtractionId] = useState<string | null>(null);
   const [extractKey, setExtractKey] = useState(0);
   const [extracting, setExtracting] = useState(false);
   const [extractProgress, setExtractProgress] = useState({ percent: 0, status: '' });
   const [error, setError] = useState<string | null>(null);
   const extractionCounterRef = useRef(0);
+  const lastLoggedOpenRef = useRef<string | null>(null);
   const filesRef = useRef<FileInfo[]>([]);
   const indexRef = useRef<number>(0);
 
@@ -421,8 +505,11 @@ function ViewerWindow() {
   useEffect(() => {
     if (!ps.compareMode || ps.compareFileIndex === null || !window.electronAPI) return;
 
-    const currentFile = filesRef.current[indexRef.current];
-    const compareFile = filesRef.current[ps.compareFileIndex];
+    // "Left" file is compareLeftIndex when set (pick-two) or currentIndex (pick-one).
+    // Reading from state (not refs) — pick-two doesn't sync ViewerWindow's indexRef.
+    const leftIdx = ps.compareLeftIndex ?? ps.currentIndex;
+    const currentFile = ps.files[leftIdx];
+    const compareFile = ps.files[ps.compareFileIndex];
     if (!currentFile || !compareFile) return;
 
     // Extract both sides sequentially to avoid race conditions
@@ -453,7 +540,6 @@ function ViewerWindow() {
     if (!filePath || !window.electronAPI) return;
 
     const myCounter = ++extractionCounterRef.current;
-    // Each extraction uses a unique slot so they don't block each other
     const slot = `main-${myCounter}`;
 
     setExtracting(true);
@@ -461,21 +547,33 @@ function ViewerWindow() {
     setImages([]);
     setExtractProgress({ percent: 0, status: 'Starting...' });
 
-    // Clean up the previous extraction's slot asynchronously (don't wait)
+    // Clean up the previous extraction's slot asynchronously
     if (myCounter > 1) {
       window.electronAPI.cleanupCbz(`main-${myCounter - 1}`);
     }
 
     window.electronAPI.extractCbz(filePath, slot).then((result) => {
-      // Only apply if this is still the latest extraction request
       if (extractionCounterRef.current !== myCounter) {
-        // This extraction is stale — clean up its slot
         window.electronAPI?.cleanupCbz(slot);
         return;
       }
 
-      if (result.error) { setError(result.error); setImages([]); setExtractionId(null); }
-      else { setImages(result.images); setExtractionId(result.extractionId); setExtractKey(k => k + 1); }
+      if (result.error) { setError(result.error); setImages([]); setImageNames([]); setTopLevelFolder(''); setExtractionId(null); }
+      else {
+        setImages(result.images);
+        setImageNames(result.imageNames ?? []);
+        setTopLevelFolder(result.topLevelFolder ?? '');
+        setExtractionId(result.extractionId);
+        setExtractKey(k => k + 1);
+        // Log "Opened" — only once per file (prevent duplicates from broadcast echo)
+        const file = filesRef.current[indexRef.current];
+        if (file && lastLoggedOpenRef.current !== file.fullPath) {
+          lastLoggedOpenRef.current = file.fullPath;
+          const pos = `[${indexRef.current + 1}/${filesRef.current.length}]`;
+          ps.addLog(`${pos} Opened: ${file.name}`, 'text-zinc-400', '📂');
+          ps.incrementStat('opened');
+        }
+      }
       setExtracting(false);
     });
   }, []);
@@ -483,7 +581,17 @@ function ViewerWindow() {
   useEffect(() => {
     if (!window.electronAPI) return;
     window.electronAPI.onViewerThemeChanged((dark) => setDarkMode(dark));
-    window.electronAPI.onExtractionProgress((progress) => setExtractProgress(progress));
+    window.electronAPI.onExtractionProgress((progress) => {
+      // Only show progress for the current extraction slot
+      const currentSlot = `main-${extractionCounterRef.current}`;
+      if (!progress.slot || progress.slot === currentSlot) {
+        // Only go forward — never show a lower percentage (prevents flickering)
+        setExtractProgress(prev => ({
+          percent: Math.max(prev.percent, progress.percent),
+          status: progress.status,
+        }));
+      }
+    });
     window.electronAPI.onMenuAction?.((action) => {
       switch (action) {
         case 'open-settings': setSettingsOpen(true); break;
@@ -508,6 +616,24 @@ function ViewerWindow() {
       }
     });
   }, [doExtract]);
+
+  /** After repack renames a CBZ on disk, swap its entry in the playlist so
+   *  navigation, sort, and the viewer all keep pointing at the correct file. */
+  const applyRepackRename = useCallback((oldPath: string, newPath: string) => {
+    const basename = (p: string) => {
+      const m = p.match(/[^\\/]+$/);
+      return m ? m[0] : p;
+    };
+    const newName = basename(newPath);
+    const patch = (list: FileInfo[]): FileInfo[] =>
+      list.map(f => f.fullPath === oldPath ? { ...f, name: newName, fullPath: newPath } : f);
+    ps.setFiles(prev => {
+      const updated = patch(prev);
+      window.electronAPI?.broadcastState({ files: updated });
+      return updated;
+    });
+    filesRef.current = patch(filesRef.current);
+  }, []);
 
   const navigateFile = useCallback((direction: 'next' | 'prev' | 'random') => {
     const f = filesRef.current;
@@ -563,6 +689,7 @@ function ViewerWindow() {
   const [controlBarMode, setControlBarMode] = useState<'auto-hide' | 'hover-only' | 'always-visible'>('auto-hide');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [repackMode, setRepackMode] = useState(false);
+  const [savedLogHeight, setSavedLogHeight] = useState(112);
   const [darkBgBrightness, setDarkBgBrightness] = useState(26);
   const [lightBgBrightness, setLightBgBrightness] = useState(232);
   const [repackColumns, setRepackColumns] = useState(3);
@@ -582,6 +709,7 @@ function ViewerWindow() {
       if (cfg.repackColumns) setRepackColumns(cfg.repackColumns);
       if (cfg.repackThumbnailSize) setRepackThumbnailSize(cfg.repackThumbnailSize);
       if (cfg.repackPanelWidth) setRepackPanelWidth(cfg.repackPanelWidth);
+      if (cfg.logHeight) setSavedLogHeight(cfg.logHeight);
       // Set beep settings for CbzViewer
       (window as any).__cbzSettings = {
         beepOnLastPage: cfg.beepOnLastPage ?? true,
@@ -714,7 +842,9 @@ function ViewerWindow() {
         }
         case 'sort': ps.handleSort(action.categoryId); break;
         case 'openSettings': setSettingsOpen(true); break;
-        case 'repack': if (images.length > 0) setRepackMode(true); break;
+        case 'repack': if (images.length > 0 && !repackMode && !ps.compareMode) setRepackMode(true); break;
+        case 'enterComparePickMode': ps.enterComparePickMode(); break;
+        case 'randomizePlaylist': ps.randomizePlaylist(); break;
         case 'filesAppended': {
           const currentFiles = filesRef.current;
           const existingPaths = new Set(currentFiles.map((f: FileInfo) => f.fullPath));
@@ -751,10 +881,27 @@ function ViewerWindow() {
       case 'view-dual-ltr': viewer?.setViewMode('dual-ltr'); break;
       case 'view-dual-rtl': viewer?.setViewMode('dual-rtl'); break;
       case 'view-scroll': viewer?.setViewMode('scroll'); break;
-      case 'next-file': navigateFile('next'); break;
+      case 'next-file': {
+        const file = filesRef.current[indexRef.current];
+        if (file) {
+          const pos = `[${indexRef.current + 1}/${filesRef.current.length}]`;
+          ps.addLog(`${pos} ⏭️ Skipped: ${file.name}`, 'text-zinc-500', '⏭️');
+          ps.incrementStat('skipped');
+        }
+        navigateFile('next');
+        break;
+      }
       case 'prev-file': navigateFile('prev'); break;
       case 'random-file': navigateFile('random'); break;
       case 'clear-log': ps.clearLog(); break;
+      case 'enter-compare': ps.enterComparePickMode(); break;
+      case 'enter-repack':
+        // Only enter repack if there's something extracted to repack, and
+        // we're not already mid-compare. No-op if already in repack mode.
+        if (!repackMode && !ps.compareMode && images.length > 0) setRepackMode(true);
+        break;
+      case 'toggle-shuffle': ps.setShuffleEnabled(!ps.shuffleEnabled); break;
+      case 'randomize-playlist': ps.randomizePlaylist(); break;
       case 'keep': case 'purge': case 'fix': case 'translate':
       case 'inquire': case 'unreadable':
         ps.handleSort(action); break;
@@ -773,11 +920,15 @@ function ViewerWindow() {
         });
         break;
     }
-  }, [navigateFile, ps.handleSort, ps.isDocked, ps.paneDark, ps.viewerDark, ps.compareMode, ps.comparePickMode, ps.comparePickTwoMode, panelWidth, playlistVisible, centerPage]);
+  }, [navigateFile, ps.handleSort, ps.isDocked, ps.paneDark, ps.viewerDark, ps.compareMode, ps.comparePickMode, ps.comparePickTwoMode, panelWidth, playlistVisible, centerPage, repackMode, images.length, ps.shuffleEnabled, ps.enterComparePickMode, ps.randomizePlaylist]);
 
   useHotkeys({ onAction: handleAction, includePageNav: true, disabled: settingsOpen });
 
   const currentFile = ps.files[ps.currentIndex] ?? null;
+  // "Left" file in compare mode: pick-two uses compareLeftIndex; pick-one uses currentIndex.
+  const compareLeftFileIdx = ps.compareLeftIndex ?? ps.currentIndex;
+  const compareLeftFile = ps.files[compareLeftFileIdx] ?? null;
+  const compareRightFile = ps.compareFileIndex !== null ? (ps.files[ps.compareFileIndex] ?? null) : null;
   const showDockedPanel = ps.isDocked && playlistVisible;
   // Center-page offset: shift viewer content left by half the panel width
   const toggleWidth = ps.isDocked ? 12 : 0;
@@ -803,21 +954,25 @@ function ViewerWindow() {
           <CompareViewer
             leftImages={compareSwapped ? compareRightImages : compareLeftImages}
             leftExtractionId={compareSwapped ? compareRightId : compareLeftId}
-            leftName={compareSwapped ? (ps.files[ps.compareFileIndex!]?.name ?? '') : (currentFile?.name ?? '')}
+            leftName={compareSwapped ? (compareRightFile?.name ?? '') : (compareLeftFile?.name ?? '')}
+            leftFileSize={compareSwapped ? compareRightFile?.sizeBytes : compareLeftFile?.sizeBytes}
+            leftCreatedDate={compareSwapped ? compareRightFile?.createdDate : compareLeftFile?.createdDate}
             rightImages={compareSwapped ? compareLeftImages : compareRightImages}
             rightExtractionId={compareSwapped ? compareLeftId : compareRightId}
-            rightName={compareSwapped ? (currentFile?.name ?? '') : (ps.files[ps.compareFileIndex!]?.name ?? '')}
+            rightName={compareSwapped ? (compareLeftFile?.name ?? '') : (compareRightFile?.name ?? '')}
+            rightFileSize={compareSwapped ? compareLeftFile?.sizeBytes : compareRightFile?.sizeBytes}
+            rightCreatedDate={compareSwapped ? compareLeftFile?.createdDate : compareRightFile?.createdDate}
             darkMode={darkMode}
             onSwap={() => setCompareSwapped(s => !s)}
             onDeleteLeft={() => {
-              const fileToDelete = compareSwapped ? ps.files[ps.compareFileIndex!] : currentFile;
+              const fileToDelete = compareSwapped ? compareRightFile : compareLeftFile;
               if (fileToDelete) {
                 ps.handleDeleteFiles([fileToDelete.fullPath]);
                 ps.exitCompare();
               }
             }}
             onDeleteRight={() => {
-              const fileToDelete = compareSwapped ? currentFile : ps.files[ps.compareFileIndex!];
+              const fileToDelete = compareSwapped ? compareLeftFile : compareRightFile;
               if (fileToDelete) {
                 ps.handleDeleteFiles([fileToDelete.fullPath]);
                 ps.exitCompare();
@@ -836,22 +991,39 @@ function ViewerWindow() {
         {repackMode && images.length > 0 && currentFile && (
           <RepackViewer
             images={images}
+            imageNames={imageNames}
             extractionId={extractionId ?? ''}
             fileName={currentFile.name}
+            initialFolderName={topLevelFolder}
             darkMode={darkMode}
             centerPage={centerPage}
             dockedPanelWidth={showDockedPanel ? panelWidth : 0}
             initialColumns={repackColumns}
             initialPanelWidthPercent={repackPanelWidth}
-            onRepack={async (keepIndices, renames) => {
+            onRepack={async (keepIndices, renames, folderName, newFileName) => {
               if (!currentFile || !extractionId) return;
-              const result = await window.electronAPI?.repackCbz(currentFile.fullPath, extractionId, keepIndices, renames);
+              const oldPath = currentFile.fullPath;
+              const result = await window.electronAPI?.repackCbz(oldPath, extractionId, keepIndices, renames as Record<string, string>, folderName, newFileName);
               if (result?.success) {
+                const newPath = result.newPath ?? oldPath;
+                if (newPath !== oldPath) applyRepackRename(oldPath, newPath);
                 setRepackMode(false);
-                // Re-extract the repacked file to refresh the viewer
-                doExtract(currentFile.fullPath);
+                doExtract(newPath);
               } else {
                 alert(`Repack failed: ${result?.error}`);
+              }
+            }}
+            onSave={async (keepIndices, renames, folderName, newFileName) => {
+              if (!currentFile || !extractionId) return;
+              const oldPath = currentFile.fullPath;
+              const result = await window.electronAPI?.repackCbz(oldPath, extractionId, keepIndices, renames as Record<string, string>, folderName, newFileName);
+              if (result?.success) {
+                const newPath = result.newPath ?? oldPath;
+                if (newPath !== oldPath) applyRepackRename(oldPath, newPath);
+                // Stay in repack mode; re-extract so the viewer reflects the saved state.
+                doExtract(newPath);
+              } else {
+                alert(`Save failed: ${result?.error}`);
               }
             }}
             onCancel={() => setRepackMode(false)}
@@ -956,6 +1128,8 @@ function ViewerWindow() {
               onSetGlobalHotkeys={ps.setGlobalHotkeys}
               onSetPaneDark={ps.setPaneDark}
               onSetViewerDark={(dark) => ps.handleViewerTheme(dark)}
+              immerseEnabled={ps.immerseEnabled}
+              onSetImmerse={ps.setImmerseEnabled}
               onToggleDocked={ps.handleToggleDocked}
               onNavigate={(action) => {
                 if (action === 'next') navigateFile('next');
@@ -984,6 +1158,7 @@ function ViewerWindow() {
               onCycleComparePick={ps.cycleComparePick}
               onCancelComparePick={ps.cancelComparePick}
               onOpenSettings={() => setSettingsOpen(true)}
+              initialLogHeight={savedLogHeight}
               onRepack={() => { if (images.length > 0) setRepackMode(true); }}
             />
           </div>
@@ -1069,9 +1244,13 @@ function PlaylistWindow() {
         if (state.compareMode) send({ type: 'exitCompare' });
         else if (state.comparePickMode || state.comparePickTwoMode) send({ type: 'cancelComparePick' });
         break;
+      case 'enter-compare': send({ type: 'enterComparePickMode' }); break;
+      case 'enter-repack': send({ type: 'repack' }); break;
+      case 'toggle-shuffle': send({ type: 'setShuffle', value: !state.shuffleEnabled }); break;
+      case 'randomize-playlist': send({ type: 'randomizePlaylist' }); break;
       case 'quit': window.electronAPI?.quitApp({ paneDark: state.paneDark, viewerDark: state.viewerDark, isDocked: state.isDocked }); break;
     }
-  }, [send, state.compareMode, state.comparePickMode, state.comparePickTwoMode, state.paneDark, state.viewerDark, state.isDocked]);
+  }, [send, state.compareMode, state.comparePickMode, state.comparePickTwoMode, state.paneDark, state.viewerDark, state.isDocked, state.shuffleEnabled]);
 
   useHotkeys({ onAction: handleAction });
 

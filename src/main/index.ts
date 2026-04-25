@@ -1,17 +1,54 @@
-import { app, ipcMain, BrowserWindow, dialog, protocol, net, shell, Menu } from 'electron';
-import { pathToFileURL } from 'url';
+import { app, ipcMain, BrowserWindow, dialog, protocol, shell, Menu } from 'electron';
 import path from 'path';
+import os from 'os';
 import fs from 'fs';
 import { execFile } from 'child_process';
 import sevenBin from '7zip-bin';
-import { createViewerWindow, createPlaylistWindow, getViewerWindow, getPlaylistWindow, getWindowBounds, sendToAll } from './window-manager';
-import { scanForCbzFiles, getFileInfoFromPaths, detectSortDestination, ensureSortFolders, sortFile, renameFile, DEFAULT_CATEGORIES } from './file-operations';
+import { createViewerWindow, createPlaylistWindow, getViewerWindow, getPlaylistWindow, getWindowBounds, sendToAll, setImmerseEnabled, destroyAllBlackouts } from './window-manager';
+import { scanForCbzFiles, getFileInfoFromPaths, detectSortDestination, ensureSortFolders, sortFile, renameFile, resolveCategoryBasePath, DEFAULT_CATEGORIES } from './file-operations';
 import { loadConfig, saveConfig } from './config-store';
-import { extractCbz, cleanupTemp, cleanupSlot, resolveImagePath, getSlotDir } from './cbz-extractor';
+import { extractCbz, cleanupTemp, cleanupSlot, resolveImage, getSlotSources, getSlotNames, hasSlot, type ImageSource } from './cbz-extractor';
 import { saveSessionLog } from './session-logger';
 
 // Track which window type each webContents ID maps to
 const windowTypeMap = new Map<number, 'viewer' | 'playlist'>();
+
+/** Copy a Node Buffer into an ArrayBuffer so Response's BodyInit typing accepts it. */
+function bufferToBody(buf: Buffer): ArrayBuffer {
+  const ab = new ArrayBuffer(buf.byteLength);
+  new Uint8Array(ab).set(buf);
+  return ab;
+}
+
+/**
+ * Return the set of Windows-illegal filename characters present in `s`, or an
+ * empty array if the string is safe. Control chars are rendered as \xNN so the
+ * user sees something printable in error messages.
+ */
+const ILLEGAL_FS_CHAR = /[<>:"/\\|?*\x00-\x1f]/;
+function findIllegalFsChars(s: string): string[] {
+  const seen = new Set<string>();
+  for (const ch of s) {
+    if (ILLEGAL_FS_CHAR.test(ch)) {
+      const code = ch.charCodeAt(0);
+      seen.add(code < 0x20 ? `\\x${code.toString(16).padStart(2, '0')}` : ch);
+    }
+  }
+  return [...seen];
+}
+
+/** Minimal MIME lookup for the image types the extractor recognises. */
+function mimeForImageName(name: string): string {
+  const ext = path.extname(name).toLowerCase();
+  switch (ext) {
+    case '.jpg': case '.jpeg': return 'image/jpeg';
+    case '.png': return 'image/png';
+    case '.gif': return 'image/gif';
+    case '.webp': return 'image/webp';
+    case '.bmp': return 'image/bmp';
+    default: return 'application/octet-stream';
+  }
+}
 
 // Register custom protocol for serving extracted CBZ images
 protocol.registerSchemesAsPrivileged([
@@ -23,19 +60,48 @@ app.whenReady().then(() => {
 
   // Register protocol handler for extracted images
   // URL format: cbz-image://host/{extractionId}/{filename}
-  protocol.handle('cbz-image', (request) => {
+  protocol.handle('cbz-image', async (request) => {
     const url = new URL(request.url);
     const parts = decodeURIComponent(url.pathname.replace(/^\/+/, '')).split('/');
     const extractionId = parts[0] ?? '';
     const filename = parts.slice(1).join('/');
 
-    const filePath = resolveImagePath(extractionId, filename);
-    if (!filePath) {
-      // Return a 1x1 transparent pixel instead of 404 to avoid console errors
-      const pixel = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
-      return new Response(pixel, { headers: { 'Content-Type': 'image/gif' } });
+    // Compare slots are reused across sessions ('compare-left' / 'compare-right'),
+    // so the same URL can map to different files. Disable caching for those to
+    // prevent a stale response from a prior session masking a fresh extraction.
+    const isCompareSlot = extractionId.startsWith('compare-');
+    const noCacheHeaders: Record<string, string> = isCompareSlot ? { 'Cache-Control': 'no-store' } : {};
+
+    const source = resolveImage(extractionId, filename);
+    if (!source) {
+      // Return 404 (not a 1x1 pixel) so the renderer's onError/retry kicks in
+      // for transient misses during extraction/cleanup races.
+      return new Response(null, { status: 404, headers: noCacheHeaders });
     }
-    return net.fetch(pathToFileURL(filePath).toString());
+
+    const contentType = mimeForImageName(filename);
+
+    const headers: Record<string, string> = { 'Content-Type': contentType, ...noCacheHeaders };
+
+    if ('memory' in source) {
+      // In-memory source — serve the buffer directly. MAX_PATH cannot bite
+      // because nothing ever touched the filesystem for this image.
+      // Wrap the Buffer in a Uint8Array view so TypeScript's Response typing
+      // accepts it as BodyInit.
+      return new Response(bufferToBody(source.memory), { status: 200, headers });
+    }
+
+    // Disk-backed source (7z fallback). Read with long-path-safe namespaced
+    // prefix and serve as a buffered Response. We avoid net.fetch(file://...)
+    // because Chromium's file:// handler on Windows has separate MAX_PATH
+    // behaviour that Node's fs (with namespaced paths) does not.
+    try {
+      const safePath = path.toNamespacedPath(source.disk);
+      const buffer = await fs.promises.readFile(safePath);
+      return new Response(bufferToBody(buffer), { status: 200, headers });
+    } catch {
+      return new Response(null, { status: 404, headers: noCacheHeaders });
+    }
   });
 
   const viewer = createViewerWindow(config.viewerWindowBounds);
@@ -56,7 +122,6 @@ app.whenReady().then(() => {
     viewer.webContents.once('did-finish-load', () => {
       const files = scanForCbzFiles(autoLoadFolder);
       if (files.length > 0) {
-        ensureSortFolders(autoLoadFolder, config.categories ?? DEFAULT_CATEGORIES);
         // Small delay to let React mount
         setTimeout(() => {
           sendToAll('state:update', { files, currentIndex: 0, sortDestination: autoLoadFolder });
@@ -129,7 +194,6 @@ app.whenReady().then(() => {
   // ─── Load Files: from folder ───────────────────────────────────────────────
   ipcMain.handle('files:load-folder', async (_event, folderPath: string) => {
     const files = scanForCbzFiles(folderPath);
-    ensureSortFolders(folderPath, config.categories ?? DEFAULT_CATEGORIES);
     return { files, sortDestination: folderPath };
   });
 
@@ -156,8 +220,37 @@ app.whenReady().then(() => {
       sortDestination = result.filePaths[0];
     }
 
-    ensureSortFolders(sortDestination, config.categories ?? DEFAULT_CATEGORIES);
     return { files, sortDestination };
+  });
+
+  // ─── Validate a user-typed path (for Settings inline validation) ───────────
+  // Returns shape the renderer can reason about without doing its own fs access.
+  // - exists:     path itself is present on disk (directory OR file)
+  // - isFile:     path exists AND is a plain file (i.e. picking it as a folder is wrong)
+  // - rootExists: the drive letter / UNC root is currently mounted
+  ipcMain.handle('files:validate-path', async (_event, p: string) => {
+    const trimmed = (p ?? '').trim();
+    if (!trimmed) return { exists: false, isFile: false, rootExists: false };
+    const nspPath = path.toNamespacedPath(trimmed);
+    let exists = false;
+    let isFile = false;
+    try {
+      const stat = fs.statSync(nspPath);
+      exists = true;
+      isFile = stat.isFile();
+    } catch {
+      // path doesn't exist (or is unreadable) — leave exists=false
+    }
+    let rootExists = false;
+    try {
+      const root = path.parse(trimmed).root;
+      // Drive roots are short (3 chars) and the \\?\ prefix actually BREAKS
+      // existsSync for drive-root queries on Windows. Use plain path.
+      rootExists = !!root && fs.existsSync(root);
+    } catch {
+      // malformed path — leave rootExists=false
+    }
+    return { exists, isFile, rootExists };
   });
 
   // ─── Pick folder via dialog ────────────────────────────────────────────────
@@ -176,17 +269,17 @@ app.whenReady().then(() => {
 
   // ─── CBZ Extraction ────────────────────────────────────────────────────────
   ipcMain.handle('cbz:extract', async (_event, cbzPath: string, slot?: string) => {
+    const effectiveSlot = slot ?? 'main';
     try {
-      const result = await extractCbz(cbzPath, slot ?? 'main', (percent, status) => {
-        // Send progress to viewer window
+      const result = await extractCbz(cbzPath, effectiveSlot, (percent, status) => {
         const vw = getViewerWindow();
         if (vw && !vw.isDestroyed()) {
-          vw.webContents.send('cbz:extract-progress', { percent, status });
+          vw.webContents.send('cbz:extract-progress', { percent, status, slot: effectiveSlot });
         }
       });
-      return { images: result.images, extractionId: result.extractionId, error: null };
+      return { images: result.images, imageNames: result.imageNames, extractionId: result.extractionId, topLevelFolder: result.topLevelFolder, error: null };
     } catch (err: any) {
-      return { images: [], extractionId: null, error: err.message ?? 'Extraction failed' };
+      return { images: [], imageNames: [], extractionId: null, topLevelFolder: '', error: err.message ?? 'Extraction failed' };
     }
   });
 
@@ -241,9 +334,9 @@ app.whenReady().then(() => {
     const category = categories.find(c => c.id === categoryId);
     if (!category) return { success: false, error: `Unknown category: ${categoryId}` };
 
-    const effectiveDest = (!config.useSourceFolder && config.customOutputFolder)
-      ? config.customOutputFolder
-      : sortDestination;
+    const effectiveDest = resolveCategoryBasePath(
+      category, config.useSourceFolder, config.customOutputFolder, sortDestination,
+    );
 
     // Don't clean up extraction slots — let them finish in background.
     // The renderer already ignores stale results via extractionCounterRef.
@@ -267,71 +360,138 @@ app.whenReady().then(() => {
   });
 
   // ─── Repack CBZ ─────────────────────────────────────────────────────────────
-  ipcMain.handle('cbz:repack', async (_event, originalPath: string, slot: string, keepIndices: number[], renames: Record<string, string>) => {
+  ipcMain.handle('cbz:repack', async (_event, originalPath: string, slot: string, keepIndices: number[], renames: Record<string, string>, folderName?: string, newFileName?: string) => {
     try {
-      const slotDir = getSlotDir(slot);
-      if (!slotDir) throw new Error('No extraction found for this file');
+      if (!hasSlot(slot)) throw new Error('No extraction found for this file');
 
-      // Collect the image files to keep, in order
-      const allImages = fs.readdirSync(slotDir)
-        .filter((f: string) => !f.startsWith('_') && /\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(f))
-        .sort((a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+      const sources = getSlotSources(slot) ?? [];
+      const names = getSlotNames(slot) ?? [];
 
-      const imagesToKeep = keepIndices
-        .filter(i => i >= 0 && i < allImages.length)
+      const imagesToWrite = keepIndices
+        .filter(i => i >= 0 && i < sources.length)
         .map(i => ({
-          sourcePath: path.join(slotDir, allImages[i]),
-          destName: renames[String(i)] ?? allImages[i],
+          source: sources[i],
+          destName: renames[String(i)] ?? names[i] ?? `page-${String(i).padStart(4, '0')}.jpg`,
         }));
 
-      if (imagesToKeep.length === 0) throw new Error('No pages to repack');
+      if (imagesToWrite.length === 0) throw new Error('No pages to repack');
 
-      // Create a staging dir for the new CBZ contents
-      const repackDir = path.join(slotDir, '_repack');
-      fs.mkdirSync(repackDir, { recursive: true });
+      // Validate folder name — reject loudly if it contains FS-illegal chars so
+      // the user knows exactly what to fix, rather than silently stripping.
+      // Empty string (after trim) is valid and means "no folder inside archive".
+      const trimmedFolder = (folderName ?? '').trim();
+      {
+        const bad = findIllegalFsChars(trimmedFolder);
+        if (bad.length > 0) {
+          throw new Error(`Folder name can't contain ${bad.join(' ')} — Windows disallows these in filenames. Remove them and try again.`);
+        }
+      }
+      const sanitizedFolder = trimmedFolder;
 
-      for (const { sourcePath, destName } of imagesToKeep) {
-        fs.copyFileSync(sourcePath, path.join(repackDir, destName));
+      // Validate per-page renames. Any illegal char here would fail the fs.write
+      // further down with a cryptic error, so reject up front with the page number.
+      for (const [key, destName] of Object.entries(renames ?? {})) {
+        const bad = findIllegalFsChars(destName);
+        if (bad.length > 0) {
+          const pageNum = Number(key) + 1;
+          throw new Error(`Page ${pageNum} rename "${destName}" contains ${bad.join(' ')} — Windows disallows these in filenames.`);
+        }
       }
 
-      // Create new CBZ using 7z — NO -spd flag here so * wildcard works
-      const tempCbz = originalPath + '.tmp';
+      // Validate CBZ filename. Empty/missing = keep current basename.
+      // Check for illegal chars BEFORE enforcing the .cbz extension (so we
+      // report the exact string the user typed, not a modified version).
+      const trimmedName = (newFileName ?? '').trim();
+      let finalFileName = trimmedName || path.basename(originalPath);
+      {
+        const bad = findIllegalFsChars(finalFileName);
+        if (bad.length > 0) {
+          throw new Error(`Filename can't contain ${bad.join(' ')} — Windows disallows these in filenames. Remove them and try again.`);
+        }
+      }
+      // Auto-add .cbz extension if missing (non-destructive convenience so the
+      // playlist scanner keeps finding the file).
+      if (!/\.cbz$/i.test(finalFileName)) finalFileName = finalFileName + '.cbz';
+
+      const originalDir = path.dirname(originalPath);
+      const finalPath = path.join(originalDir, finalFileName);
+      // Case-insensitive compare on Windows so "Foo.cbz" → "foo.cbz" (same file,
+      // different case) doesn't trip the dupe check below.
+      const isRename = process.platform === 'win32'
+        ? finalPath.toLowerCase() !== originalPath.toLowerCase()
+        : finalPath !== originalPath;
+
+      // Dupe check: if the new name targets a different existing file, bail out.
+      if (isRename && fs.existsSync(path.toNamespacedPath(finalPath))) {
+        throw new Error(`A file named "${finalFileName}" already exists in this folder`);
+      }
+
+      // Create a short-path staging dir for the new CBZ contents. Kept short
+      // on purpose so 7za's wildcard expansion doesn't trip MAX_PATH when the
+      // user picks a long folder name.
+      const repackDir = path.join(os.tmpdir(), `cbz-rep-${Date.now().toString(36)}`);
+      fs.mkdirSync(repackDir, { recursive: true });
+      const contentDir = sanitizedFolder ? path.join(repackDir, sanitizedFolder) : repackDir;
+      if (sanitizedFolder) fs.mkdirSync(contentDir, { recursive: true });
+
+      for (const { source, destName } of imagesToWrite) {
+        const destPath = path.toNamespacedPath(path.join(contentDir, destName));
+        if ('memory' in source) {
+          fs.writeFileSync(destPath, source.memory);
+        } else {
+          fs.copyFileSync(path.toNamespacedPath(source.disk), destPath);
+        }
+      }
+
+      // Create new CBZ using 7z at a SHORT temp location so 7za never sees
+      // the user's possibly-long original path. We move it into place afterwards.
+      const tempCbz = path.join(os.tmpdir(), `cbz-out-${Date.now().toString(36)}.cbz`);
+      // If nested in a folder, zip the folder itself (preserves folder entry);
+      // otherwise zip the staging contents flat.
+      const sourceArg = sanitizedFolder
+        ? path.join(repackDir, sanitizedFolder)
+        : repackDir + path.sep + '*';
       await new Promise<void>((resolve, reject) => {
-        execFile(sevenBin.path7za, ['a', '-tzip', tempCbz, repackDir + path.sep + '*'], {
+        execFile(sevenBin.path7za, ['a', '-tzip', tempCbz, sourceArg], {
           timeout: 60000, maxBuffer: 10 * 1024 * 1024,
-        }, (err: any, stdout: string, stderr: string) => {
-          // 7z returns exit code 0 on success, check if files were actually added
+        }, (err: any, _stdout: string, stderr: string) => {
           if (err) reject(new Error(stderr?.trim() || err.message));
           else resolve();
         });
       });
 
-      // Verify the temp CBZ is valid (not empty)
+      // Verify the temp CBZ is valid (not empty). tempCbz is short, plain stat OK.
       const tempStat = fs.statSync(tempCbz);
       if (tempStat.size < 100) {
-        fs.unlinkSync(tempCbz);
+        try { fs.unlinkSync(tempCbz); } catch {}
         throw new Error('Repack produced an empty archive — files may not have been found');
       }
 
-      // Backup original to [Repack Backup] folder before replacing
-      const originalDir = path.dirname(originalPath);
+      // Backup original to [Repack Backup] folder before replacing. Every path
+      // that touches the user's long filename goes through toNamespacedPath so
+      // Node's fs bypasses MAX_PATH on Windows. (originalDir declared above.)
       const backupDir = path.join(originalDir, '[Repack Backup]');
-      if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
+      const backupDirNs = path.toNamespacedPath(backupDir);
+      if (!fs.existsSync(backupDirNs)) fs.mkdirSync(backupDirNs, { recursive: true });
       const backupPath = path.join(backupDir, path.basename(originalPath));
-      // If backup already exists, add timestamp
-      const finalBackupPath = fs.existsSync(backupPath)
+      const backupPathNs = path.toNamespacedPath(backupPath);
+      const finalBackupPath = fs.existsSync(backupPathNs)
         ? path.join(backupDir, `${path.basename(originalPath, path.extname(originalPath))}_${Date.now()}${path.extname(originalPath)}`)
         : backupPath;
-      fs.copyFileSync(originalPath, finalBackupPath);
+      fs.copyFileSync(path.toNamespacedPath(originalPath), path.toNamespacedPath(finalBackupPath));
 
-      // Replace original
-      fs.unlinkSync(originalPath);
-      fs.renameSync(tempCbz, originalPath);
+      // Replace. Use copy+unlink (not rename) because tempCbz lives on the
+      // system tmpdir (likely C:\) while finalPath may be on a different drive
+      // — rename across filesystems fails with EXDEV. Unlinking the original
+      // first also lets case-only renames work on Windows (e.g. foo.cbz → Foo.cbz).
+      fs.unlinkSync(path.toNamespacedPath(originalPath));
+      fs.copyFileSync(tempCbz, path.toNamespacedPath(finalPath));
+      try { fs.unlinkSync(tempCbz); } catch {}
 
       // Cleanup
       try { fs.rmSync(repackDir, { recursive: true, force: true }); } catch {}
 
-      return { success: true, pagesKept: imagesToKeep.length };
+      return { success: true, pagesKept: imagesToWrite.length, newPath: finalPath };
     } catch (err: any) {
       return { success: false, error: err.message ?? 'Repack failed' };
     }
@@ -372,6 +532,13 @@ app.whenReady().then(() => {
   ipcMain.on('layout:set-docked', (_event, docked: boolean) => {
     const pw = getPlaylistWindow();
     const vw = getViewerWindow();
+    // Immerse is incompatible with detached mode — it would black out the
+    // playlist window sitting on another monitor. Turn it off before detaching
+    // so the transition is clean; tell renderers to reset their toggle state.
+    if (!docked) {
+      setImmerseEnabled(false);
+      sendToAll('immerse:changed', false);
+    }
     if (docked) {
       // Hide playlist window, viewer shows docked panel
       if (pw && !pw.isDestroyed()) pw.hide();
@@ -381,6 +548,11 @@ app.whenReady().then(() => {
     }
     // Notify both windows of the mode change
     sendToAll('layout:docked-changed', docked);
+  });
+
+  // ─── Immerse Mode (black out non-viewer monitors) ──────────────────────────
+  ipcMain.on('immerse:set-enabled', (_event, enabled: boolean) => {
+    setImmerseEnabled(enabled);
   });
 
   // ─── Save/Load UI State ─────────────────────────────────────────────────────
@@ -428,16 +600,19 @@ app.whenReady().then(() => {
     if (uiState?.sessionLog) {
       saveSessionLog(uiState.sessionLog);
     }
+    destroyAllBlackouts();
     cleanupTemp();
     app.quit();
   });
 
   // ─── Coupled windows: closing one closes both ─────────────────────────────
   viewer.on('closed', () => {
+    destroyAllBlackouts();
     const pw = getPlaylistWindow();
     if (pw && !pw.isDestroyed()) pw.close();
   });
   playlist.on('closed', () => {
+    destroyAllBlackouts();
     const vw = getViewerWindow();
     if (vw && !vw.isDestroyed()) vw.close();
   });
@@ -445,6 +620,7 @@ app.whenReady().then(() => {
 
 // Quit when all windows are closed
 app.on('window-all-closed', () => {
+  destroyAllBlackouts();
   cleanupTemp();
   app.quit();
 });

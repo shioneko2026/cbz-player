@@ -16,5 +16,20 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Claude Code session metadata (per-machine; never tracked)
+.claude/
+
+# Session continuity doc — contains personal info (name, email, locale, workflow);
+# never publish to the public repo. Lives only on the local machine.
+HANDOFF.md
+
+# Windows shortcut files (personal launchers, not part of build)
+*.lnk
+
 # Temp extraction dirs
 cbz-sorter-viewer/
+
+# Personal CBZ test folders sitting in project root — DO NOT commit personal collection content.
+# Add new entries here whenever you drop a CBZ folder into the project root for testing.
+/\[Pony-R\]*/
+/\[Yue\]*/

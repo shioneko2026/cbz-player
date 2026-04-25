@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   loadFolder: (folderPath: string) => ipcRenderer.invoke('files:load-folder', folderPath),
   loadPaths: (filePaths: string[]) => ipcRenderer.invoke('files:load-paths', filePaths),
   pickFolder: () => ipcRenderer.invoke('files:pick-folder'),
+  validatePath: (p: string) => ipcRenderer.invoke('files:validate-path', p) as Promise<{ exists: boolean; isFile: boolean; rootExists: boolean }>,
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
 
   // File operations
@@ -35,8 +36,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // CBZ extraction (slot defaults to 'main', compare mode uses 'compare-left'/'compare-right')
   extractCbz: (cbzPath: string, slot?: string) => ipcRenderer.invoke('cbz:extract', cbzPath, slot),
   cleanupCbz: (slot?: string) => ipcRenderer.invoke('cbz:cleanup', slot),
-  repackCbz: (originalPath: string, slot: string, keepIndices: number[], renames: Record<string, string>) =>
-    ipcRenderer.invoke('cbz:repack', originalPath, slot, keepIndices, renames),
+  repackCbz: (originalPath: string, slot: string, keepIndices: number[], renames: Record<string, string>, folderName?: string, newFileName?: string) =>
+    ipcRenderer.invoke('cbz:repack', originalPath, slot, keepIndices, renames, folderName, newFileName),
   onExtractionProgress: (callback: (progress: { percent: number; status: string }) => void) => {
     ipcRenderer.on('cbz:extract-progress', (_event, progress) => callback(progress));
   },
@@ -66,6 +67,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setDockedMode: (docked: boolean) => ipcRenderer.send('layout:set-docked', docked),
   onDockedModeChanged: (callback: (docked: boolean) => void) => {
     ipcRenderer.on('layout:docked-changed', (_event, docked) => callback(docked));
+  },
+
+  // Immerse mode (black out non-viewer monitors)
+  setImmerseEnabled: (enabled: boolean) => ipcRenderer.send('immerse:set-enabled', enabled),
+  onImmerseChanged: (callback: (enabled: boolean) => void) => {
+    ipcRenderer.on('immerse:changed', (_event, enabled) => callback(enabled));
   },
 
   // Playlist state sync (viewer → detached playlist)

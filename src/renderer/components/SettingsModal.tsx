@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 
 interface CategoryConfig {
   id: string;
@@ -9,6 +9,70 @@ interface CategoryConfig {
   parentCategory?: string;
   dupeFolderName?: string;
   isPurge?: boolean;
+  outputPath?: string;
+}
+
+// Matches the backend regex (src/main/index.ts) — any Windows-illegal
+// filename char (including control chars). Forward slash is legal inside
+// a path though, so we test per-segment and allow the path separator.
+const ILLEGAL_FS_CHAR_IN_SEGMENT = /[<>:"|?*\x00-\x1f]/;
+
+function validateOverrideSync(raw: string): string[] {
+  const errors: string[] = [];
+  const p = (raw ?? '').trim();
+  if (!p) return errors; // empty = no override, no errors
+
+  // Absolute-path check: reject relative inputs like ".\foo" or "../bar"
+  // Accept Windows drive-letter paths (C:\…) and UNC paths (\\server\share).
+  const isAbsoluteWin = /^[a-zA-Z]:[\\/]/.test(p) || /^\\\\/.test(p);
+  if (!isAbsoluteWin) {
+    errors.push('Must be an absolute path (e.g. D:\\Archive or \\\\server\\share)');
+  }
+
+  // Illegal-char check per segment (skip the drive letter's colon).
+  const stripped = /^[a-zA-Z]:[\\/]?/.test(p) ? p.slice(p.indexOf(':') + 1) : p;
+  const segments = stripped.split(/[\\/]/).filter(Boolean);
+  const badChars = new Set<string>();
+  for (const seg of segments) {
+    for (const ch of seg) {
+      if (ILLEGAL_FS_CHAR_IN_SEGMENT.test(ch)) {
+        const code = ch.charCodeAt(0);
+        badChars.add(code < 0x20 ? `\\x${code.toString(16).padStart(2, '0')}` : ch);
+      }
+    }
+  }
+  if (badChars.size > 0) {
+    errors.push(`Remove illegal characters: ${[...badChars].join(' ')}`);
+  }
+
+  return errors;
+}
+
+function normalizeOverride(raw: string): string {
+  return (raw ?? '').trim().replace(/[\\/]+$/, '');
+}
+
+function buildResolvedPath(outputPath: string, category: CategoryConfig, categories: CategoryConfig[]): string {
+  const base = outputPath.replace(/[\\/]+$/, '');
+  // Override skips parent nesting (matches backend sortFile logic)
+  return `${base}\\${category.folderName}`;
+}
+
+function findFinalPathCollisions(categories: CategoryConfig[]): Set<string> {
+  // Returns the set of category ids whose resolved final path matches another's.
+  const counts = new Map<string, string[]>();
+  for (const c of categories) {
+    if (c.isPurge || !c.outputPath?.trim() || !c.folderName) continue;
+    const key = buildResolvedPath(c.outputPath, c, categories).toLowerCase();
+    const ids = counts.get(key) ?? [];
+    ids.push(c.id);
+    counts.set(key, ids);
+  }
+  const colliding = new Set<string>();
+  for (const ids of counts.values()) {
+    if (ids.length > 1) ids.forEach(id => colliding.add(id));
+  }
+  return colliding;
 }
 
 interface SettingsModalProps {
@@ -19,7 +83,7 @@ interface SettingsModalProps {
   onLiveBgChange?: (darkBrightness: number, lightBrightness: number) => void;
 }
 
-type Tab = 'categories' | 'folders' | 'viewer' | 'repack' | 'ui';
+type Tab = 'categories' | 'folders' | 'viewer' | 'repack' | 'ui' | 'shortcuts';
 
 export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLiveBgChange }: SettingsModalProps) {
   const [tab, setTab] = useState<Tab>('categories');
@@ -41,12 +105,40 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
   const [repackThumbnailSize, setRepackThumbnailSize] = useState(150);
   const [repackPanelWidth, setRepackPanelWidth] = useState(40);
   const [loading, setLoading] = useState(true);
+  // Async fs validation results for each category's outputPath, keyed by category id.
+  // Updated on load, on blur of the override input, and when Browse picks a folder.
+  // Sync validation (illegal chars, relative paths) is derived from `categories` via useMemo.
+  const [pathValidation, setPathValidation] = useState<Record<string, { exists: boolean; isFile: boolean; rootExists: boolean }>>({});
+
+  const runAsyncValidation = useCallback(async (catId: string, p: string) => {
+    if (!window.electronAPI || !p.trim()) {
+      setPathValidation(prev => {
+        const next = { ...prev };
+        delete next[catId];
+        return next;
+      });
+      return;
+    }
+    const api = window.electronAPI as any;
+    if (typeof api.validatePath !== 'function') return;
+    try {
+      const result = await api.validatePath(p);
+      setPathValidation(prev => ({ ...prev, [catId]: result }));
+    } catch {
+      // IPC failure — leave previous state, the sort itself will surface the real error
+    }
+  }, []);
 
   // Load settings on open
   useEffect(() => {
     if (!isOpen || !window.electronAPI) return;
     window.electronAPI.loadSettings().then((config: any) => {
-      setCategories(config.categories || []);
+      const loadedCats: CategoryConfig[] = config.categories || [];
+      setCategories(loadedCats);
+      // Pre-validate any existing overrides so warnings (e.g. drive missing) show immediately.
+      for (const c of loadedCats) {
+        if (c.outputPath?.trim()) runAsyncValidation(c.id, c.outputPath);
+      }
       setUseSourceFolder(config.useSourceFolder ?? true);
       setCustomOutputFolder(config.customOutputFolder ?? '');
       setViewerMode(config.viewerMode || 'single');
@@ -82,10 +174,38 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
   const resetRepack = () => { setRepackColumns(3); setRepackThumbnailSize(150); setRepackPanelWidth(40); };
   const resetUI = () => { setDefaultDocked(false); setDefaultPanelWidth(320); setStartFullscreen(false); setDarkBgBrightness(26); setLightBgBrightness(232); };
 
+  // Per-category sync errors (illegal chars, relative path) — pure derivation, recomputes on every render.
+  const syncErrorsByCat = useMemo(() => {
+    const out: Record<string, string[]> = {};
+    for (const c of categories) {
+      out[c.id] = c.outputPath ? validateOverrideSync(c.outputPath) : [];
+    }
+    return out;
+  }, [categories]);
+
+  const collidingIds = useMemo(() => findFinalPathCollisions(categories), [categories]);
+
+  // Save is blocked when any override has sync errors or points at a file (not a directory).
+  const hasBlockingErrors = useMemo(() => {
+    return categories.some(c => {
+      if (syncErrorsByCat[c.id]?.length > 0) return true;
+      const v = pathValidation[c.id];
+      if (v && v.exists && v.isFile) return true;
+      return false;
+    });
+  }, [categories, syncErrorsByCat, pathValidation]);
+
   const handleSave = useCallback(async () => {
-    if (!window.electronAPI) return;
+    if (!window.electronAPI || hasBlockingErrors) return;
+    // Normalize outputPaths: trim + strip trailing separators. Empty → field removed.
+    const normalizedCategories = categories.map(c => {
+      if (!('outputPath' in c)) return c;
+      const cleaned = normalizeOverride(c.outputPath ?? '');
+      const { outputPath, ...rest } = c;
+      return cleaned ? { ...rest, outputPath: cleaned } : rest;
+    });
     await window.electronAPI.saveSettings({
-      categories,
+      categories: normalizedCategories,
       viewerMode,
       controlsHideDelay,
       controlBarMode,
@@ -105,7 +225,7 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
     });
     onSaved?.();
     onClose();
-  }, [categories, viewerMode, controlsHideDelay, controlBarMode, defaultDocked, defaultPanelWidth, startFullscreen, darkBgBrightness, lightBgBrightness, useSourceFolder, customOutputFolder, beepOnLastPage, beepVolume, beepPitch, repackColumns, repackThumbnailSize, repackPanelWidth, onClose, onSaved]);
+  }, [categories, hasBlockingErrors, viewerMode, controlsHideDelay, controlBarMode, defaultDocked, defaultPanelWidth, startFullscreen, darkBgBrightness, lightBgBrightness, useSourceFolder, customOutputFolder, beepOnLastPage, beepVolume, beepPitch, repackColumns, repackThumbnailSize, repackPanelWidth, onClose, onSaved]);
 
   const updateCategory = (index: number, field: string, value: string) => {
     setCategories(prev => prev.map((c, i) => i === index ? { ...c, [field]: value } : c));
@@ -123,6 +243,30 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
     const cat = categories[index];
     if (cat.id === 'keep' || cat.id === 'purge') return; // Can't remove these
     setCategories(prev => prev.filter((_, i) => i !== index));
+    // Drop any cached async validation for the removed category
+    setPathValidation(prev => {
+      const next = { ...prev };
+      delete next[cat.id];
+      return next;
+    });
+  };
+
+  const handleOverrideBrowse = async (index: number) => {
+    const folder = await window.electronAPI?.pickFolder();
+    if (!folder) return;
+    const cat = categories[index];
+    updateCategory(index, 'outputPath', folder);
+    runAsyncValidation(cat.id, folder);
+  };
+
+  const handleOverrideClear = (index: number) => {
+    const cat = categories[index];
+    updateCategory(index, 'outputPath', '');
+    setPathValidation(prev => {
+      const next = { ...prev };
+      delete next[cat.id];
+      return next;
+    });
   };
 
   if (!isOpen) return null;
@@ -146,7 +290,7 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
 
         {/* Tabs */}
         <div className={`px-6 py-2 border-b ${border} flex gap-1`}>
-          {([['categories', 'Sort Categories'], ['folders', 'Folders'], ['viewer', 'Viewer'], ['repack', 'Repack'], ['ui', 'UI Behavior']] as const).map(([t, label]) => (
+          {([['categories', 'Sort Categories'], ['folders', 'Folders'], ['viewer', 'Viewer'], ['repack', 'Repack'], ['ui', 'UI Behavior'], ['shortcuts', 'Shortcuts']] as const).map(([t, label]) => (
             <button key={t} onClick={() => setTab(t)} className={`px-3 py-1.5 rounded text-sm ${tab === t ? tabActive : tabInactive}`}>
               {label}
             </button>
@@ -161,8 +305,15 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
             <div className="space-y-3">
               {categories.map((cat, i) => {
                 const locked = cat.id === 'keep' || cat.id === 'purge';
+                const overrideRaw = cat.outputPath ?? '';
+                const hasOverride = !!overrideRaw.trim();
+                const syncErrors = syncErrorsByCat[cat.id] ?? [];
+                const asyncCheck = pathValidation[cat.id];
+                const isFileError = !!(hasOverride && asyncCheck?.exists && asyncCheck.isFile);
+                const driveMissingWarning = !!(hasOverride && asyncCheck && !asyncCheck.rootExists);
+                const collisionWarning = collidingIds.has(cat.id);
                 return (
-                  <div key={cat.id} className={`p-3 rounded border ${border} space-y-2`}>
+                  <div key={cat.id} className={`p-3 rounded border ${border} space-y-2 transition-shadow ${hasOverride ? 'ring-2 ring-amber-500 shadow-[0_0_12px_rgba(245,158,11,0.45)]' : ''}`}>
                     <div className="flex items-center gap-2">
                       <span className={`text-xs ${subtext} w-16`}>Label</span>
                       <input value={cat.label} onChange={e => updateCategory(i, 'label', e.target.value)}
@@ -193,6 +344,59 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
                         </div>
                       )}
                     </div>
+                    {!cat.isPurge && (
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs ${subtext} w-16`} title="Optional. When set, this category's files go here instead of the default from the Folders tab.">
+                            Override
+                          </span>
+                          <input
+                            value={overrideRaw}
+                            onChange={e => updateCategory(i, 'outputPath', e.target.value)}
+                            onBlur={() => runAsyncValidation(cat.id, overrideRaw)}
+                            placeholder="Leave blank to use default from Folders tab"
+                            className={`flex-1 text-sm px-2 py-1 rounded border ${inputBg}`}
+                          />
+                          <button
+                            onClick={() => handleOverrideBrowse(i)}
+                            className={`px-2 py-1 rounded text-xs ${darkMode ? 'bg-zinc-700 hover:bg-zinc-600' : 'bg-zinc-200 hover:bg-zinc-300'}`}
+                            title="Pick a folder"
+                          >
+                            Browse...
+                          </button>
+                          {hasOverride && (
+                            <button
+                              onClick={() => handleOverrideClear(i)}
+                              className={`px-2 py-1 rounded text-xs ${darkMode ? 'bg-zinc-700 hover:bg-zinc-600 text-zinc-300' : 'bg-zinc-200 hover:bg-zinc-300 text-zinc-700'}`}
+                              title="Clear override (revert to default)"
+                            >
+                              ×
+                            </button>
+                          )}
+                        </div>
+                        {hasOverride && cat.folderName && syncErrors.length === 0 && !isFileError && (
+                          <p className={`text-xs ${subtext} pl-[4.5rem] break-all`}>
+                            → {buildResolvedPath(overrideRaw, cat, categories)}
+                          </p>
+                        )}
+                        {syncErrors.map((msg, idx) => (
+                          <p key={`err-${idx}`} className="text-xs text-red-400 pl-[4.5rem]">{msg}</p>
+                        ))}
+                        {isFileError && (
+                          <p className="text-xs text-red-400 pl-[4.5rem]">Path points to a file, not a folder</p>
+                        )}
+                        {driveMissingWarning && (
+                          <p className="text-xs text-amber-400 pl-[4.5rem]">
+                            Drive isn't mounted — sorts to this category will fail until the drive comes online
+                          </p>
+                        )}
+                        {collisionWarning && (
+                          <p className="text-xs text-amber-400 pl-[4.5rem]">
+                            Another category resolves to the same final path — sorts may overwrite each other
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -341,6 +545,75 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
                 Reset repack settings to defaults
               </button>
             </div>
+          ) : tab === 'shortcuts' ? (
+            <div className="space-y-4 text-sm">
+              <p className={`${subtext}`}>
+                Reference for all keyboard shortcuts. These are defined in code — this tab doesn't edit them.
+              </p>
+              {([
+                ['Sort', [
+                  ...categories
+                    .filter(c => c.hotkey)
+                    .map(c => [c.hotkey.toUpperCase(), c.label] as [string, string]),
+                ]],
+                ['File navigation', [
+                  ['N', 'Next file'],
+                  ['B', 'Previous file'],
+                  ['R', 'Random file'],
+                  ['] / \\', 'Next file'],
+                  ['[ / Backspace', 'Previous file'],
+                ]],
+                ['Page navigation (viewer)', [
+                  ['← ↑', 'Previous page'],
+                  ['→ ↓ Space', 'Next page'],
+                  ['Home / PageUp', 'First page'],
+                  ['End / PageDown', 'Last page'],
+                ]],
+                ['View modes', [
+                  ['Ctrl+1', 'Single page'],
+                  ['Ctrl+2', 'Dual LTR'],
+                  ['Ctrl+3', 'Dual RTL'],
+                  ['Ctrl+4', 'Vertical scroll'],
+                  ['Ctrl+E', 'Toggle center page'],
+                ]],
+                ['Modes', [
+                  ['Ctrl+Shift+C', 'Enter compare mode (pick with current)'],
+                  ['Ctrl+Shift+R', 'Enter repack mode'],
+                  ['Ctrl+S', 'Save changes in repack mode (stays in mode)'],
+                  ['Escape', 'Exit current mode / cancel action'],
+                ]],
+                ['Playlist', [
+                  ['Ctrl+Shift+S', 'Toggle shuffle mode (navigation)'],
+                  ['Ctrl+Alt+S', 'Randomize playlist order (current stays first)'],
+                  ['F2', 'Rename current file'],
+                  ['F6', 'Toggle playlist panel (docked mode)'],
+                ]],
+                ['App', [
+                  ['Ctrl+Q', 'Quit'],
+                  ['Ctrl+R', 'Refresh'],
+                  ['F11 / Enter', 'Toggle fullscreen'],
+                  ['C', 'Clear log'],
+                ]],
+              ] as Array<[string, Array<[string, string]>]>).map(([group, rows]) => (
+                <div key={group} className={`p-3 rounded border ${border}`}>
+                  <h4 className={`text-xs font-semibold uppercase tracking-wide ${subtext} mb-2`}>{group}</h4>
+                  {rows.length === 0 ? (
+                    <p className={`text-xs italic ${subtext}`}>No shortcuts configured.</p>
+                  ) : (
+                    <div className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1">
+                      {rows.map(([key, label]) => (
+                        <React.Fragment key={`${group}-${key}-${label}`}>
+                          <kbd className={`text-xs font-mono px-1.5 py-0.5 rounded border ${darkMode ? 'bg-zinc-800 border-zinc-700 text-zinc-200' : 'bg-zinc-100 border-zinc-300 text-zinc-800'} whitespace-nowrap`}>
+                            {key}
+                          </kbd>
+                          <span className={`text-xs ${text}`}>{label}</span>
+                        </React.Fragment>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
           ) : (
             <div className="space-y-4">
               <div className="flex items-center justify-between">
@@ -389,11 +662,18 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
         </div>
 
         {/* Footer */}
-        <div className={`px-6 py-3 border-t ${border} flex justify-end gap-2`}>
+        <div className={`px-6 py-3 border-t ${border} flex justify-end items-center gap-3`}>
+          {hasBlockingErrors && (
+            <span className="text-xs text-red-400 mr-auto">Fix override errors before saving</span>
+          )}
           <button onClick={onClose} className={`px-4 py-1.5 rounded text-sm ${darkMode ? 'bg-zinc-700 hover:bg-zinc-600' : 'bg-zinc-200 hover:bg-zinc-300'}`}>
             Cancel
           </button>
-          <button onClick={handleSave} className="px-4 py-1.5 rounded text-sm bg-blue-600 hover:bg-blue-500 text-white">
+          <button
+            onClick={handleSave}
+            disabled={hasBlockingErrors}
+            className={`px-4 py-1.5 rounded text-sm text-white ${hasBlockingErrors ? 'bg-blue-600/40 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500'}`}
+          >
             Save
           </button>
         </div>

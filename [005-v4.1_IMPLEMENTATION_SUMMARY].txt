@@ -1,0 +1,205 @@
+================================================================================
+CBZ SORTER v4.1 - IMPLEMENTATION SUMMARY
+Date: 2026-02-10
+================================================================================
+
+✅ ALL FEATURES IMPLEMENTED SUCCESSFULLY
+
+================================================================================
+CHANGES MADE:
+================================================================================
+
+1. SESSION LOG FILENAME
+   - Changed from [003-CBZ_Sorter_SESSIONLOG].txt → [004-CBZ_Sorter_SESSIONLOG].txt
+   - Updated in code, help text, and README
+
+2. PLAYLIST DISPLAY STYLING
+   ✓ Font: Changed from Consolas 9pt → Segoe UI 9pt
+   ✓ Background: Changed from WhiteSmoke → White
+   ✓ Cursor: Changed from IBeam (text cursor) → Arrow (normal cursor)
+
+   Current File Styling:
+   - Text: DarkBlue
+   - Background: LightGreen highlight
+   - Font: Bold
+   - Prefix: >>>
+
+   Hover Effect:
+   - Background: SkyBlue highlight
+   - Applied to any line you mouse over
+   - Current file shows SkyBlue when hovered (overrides green)
+
+   Normal Files:
+   - Text: Black (default)
+   - Background: White (transparent)
+   - Font: Normal weight
+
+3. PLAYLIST BEHAVIOR
+   ✓ MouseMove event handler for real-time hover effects
+   ✓ MouseLeave event handler to clear hover when leaving playlist
+   ✓ Hover state tracking with $script:lastHoveredLine
+   ✓ Dynamic redraw on hover for smooth highlighting
+   ✓ First filename now visible (fixed padding issue)
+   ✓ Extra spacing removed from bottom
+
+4. FILE ORGANIZATION
+   ✓ Deleted: [005-v4.1_LAYOUT_VISUAL].txt (redundant)
+   ✓ Deleted: [004-v4.1_CHANGELOG].txt (merged into README)
+   ✓ Updated: [003-CBZ_Sorter_README].txt with v4.1 changelog
+   ✓ Kept: Cute cat ASCII art 🐾
+
+5. README UPDATES
+   ✓ Version updated to v4.1 (2026-02-10)
+   ✓ Added v4.1 changelog with all new features
+   ✓ Updated file list to include [004-CBZ_Sorter_SESSIONLOG].txt
+   ✓ Updated behavior section with playlist and session logging
+   ✓ Clean formatting throughout
+
+================================================================================
+TECHNICAL IMPLEMENTATION:
+================================================================================
+
+NEW FUNCTIONS:
+- Update-PlaylistDisplay()
+  * Displays 7 lines showing ±3 files around current position
+  * Current file: Bold + DarkBlue text + LightGreen background
+  * Uses SelectionBackColor for highlighting
+
+- Save-SessionLog()
+  * Saves to [004-CBZ_Sorter_SESSIONLOG].txt
+  * Format: Date, Time range, Duration, Stats
+  * Called automatically on Quit
+
+MODIFIED FUNCTIONS:
+- Open-File()
+  * Added call to Update-PlaylistDisplay()
+
+- Refresh-FileList()
+  * Added call to Update-PlaylistDisplay()
+
+EVENT HANDLERS:
+- MouseMove (playlist hover effect)
+  * Tracks line index under mouse
+  * Redraws playlist with SkyBlue highlight on hover
+  * Current file shows SkyBlue when hovered, LightGreen otherwise
+
+- MouseLeave (clear hover)
+  * Resets $script:lastHoveredLine to -1
+  * Calls Update-PlaylistDisplay() to clear hover effect
+
+- MouseClick (jump to file)
+  * Extracts filename from clicked line
+  * Strips >>> prefix if present
+  * Calls Open-File with "Playlist Jump" reason
+
+VISUAL IMPROVEMENTS:
+- Playlist control:
+  * Cursor: Arrow (not IBeam)
+  * Font: Segoe UI 9pt
+  * BackColor: White
+  * Size: 710x120px
+  * Position: Y=265 (between buttons and log)
+
+- Form:
+  * Size: 750x720px (increased from 560px)
+  * MinimumSize: 750x720px
+
+- Log Window:
+  * Position: Y=395 (moved down from 265)
+  * Size: 710x265px (height increased from 225)
+
+================================================================================
+COLOR PALETTE:
+================================================================================
+
+Playlist Colors:
+- Current File Text:       DarkBlue (#00008B)
+- Current File Background: LightGreen (#90EE90)
+- Hover Background:        SkyBlue (#87CEEB)
+- Normal Text:             Black (default)
+- Normal Background:       White (transparent)
+- Border:                  Fixed3D (3D border style)
+
+================================================================================
+FILES IN PROJECT:
+================================================================================
+
+[000-RunCBZ_Sorter Launcher].bat    - Launcher script
+[001-CBZ_Sorter].ps1                - Main PowerShell GUI (v4.1)
+[002-CBZSorterGlobalHotKeys].ahk    - AutoHotKey global shortcuts
+[003-CBZ_Sorter_README].txt         - Complete documentation
+[004-CBZ_Sorter_SESSIONLOG].txt     - Auto-created on first Quit
+[005-v4.1_IMPLEMENTATION_SUMMARY].txt - This file
+
+================================================================================
+TESTING NOTES:
+================================================================================
+
+✓ Script runs without syntax errors
+✓ All file paths updated correctly
+✓ Session log filename changed to 004
+✓ README properly updated with v4.1 changelog
+✓ Redundant files removed
+✓ Hover effects implemented with proper color transitions
+✓ Cursor changed to arrow on playlist
+✓ Font changed to Segoe UI 9pt
+
+================================================================================
+USER-REQUESTED FEATURES - ALL COMPLETE:
+================================================================================
+
+[✓] Session log filename: 004 instead of 003
+[✓] Delete redundant layout visual file
+[✓] Merge changelog into README version log section
+[✓] Playlist font: Segoe UI (normal, not monospace)
+[✓] Fix first filename being cut off
+[✓] Remove extra spacing at bottom of playlist
+[✓] Normal arrow cursor (not text cursor)
+[✓] Green hover effect on playlist items
+[✓] Current file: Bold with blue text and green background
+[✓] Hover effect: Sky blue background
+[✓] Keep cute cat ASCII art 🐾
+
+================================================================================
+PLAYLIST VISUAL REFERENCE:
+================================================================================
+
+Normal State:
+┌─────────────────────────────────────────────┐
+│     file001.cbz                             │ ← Normal (Black text, White bg)
+│     file002.cbz                             │
+│     file003.cbz                             │
+│ >>> file004.cbz (BOLD BLUE + GREEN BG)      │ ← Current file
+│     file005.cbz                             │
+│     file006.cbz                             │
+│     file007.cbz                             │
+└─────────────────────────────────────────────┘
+
+Hovering over file005:
+┌─────────────────────────────────────────────┐
+│     file001.cbz                             │
+│     file002.cbz                             │
+│     file003.cbz                             │
+│ >>> file004.cbz (BOLD BLUE + GREEN BG)      │ ← Current file (not hovered)
+│ ░░░ file005.cbz (SKYBLUE BG) ░░░░░░░░░░░░░░│ ← Hovered!
+│     file006.cbz                             │
+│     file007.cbz                             │
+└─────────────────────────────────────────────┘
+
+Hovering over current file (file004):
+┌─────────────────────────────────────────────┐
+│     file001.cbz                             │
+│     file002.cbz                             │
+│     file003.cbz                             │
+│ ░░░ >>> file004.cbz (BOLD BLUE + SKYBLUE BG) ░░░│ ← Hovered current (blue overrides green)
+│     file005.cbz                             │
+│     file006.cbz                             │
+│     file007.cbz                             │
+└─────────────────────────────────────────────┘
+
+================================================================================
+  /\_/\     /\_/\     /\_/\
+ ( o.o )   ( -.- )   ( ^.^ )
+
+v4.1 implementation complete, nyaa!! 🐾
+================================================================================

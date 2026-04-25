@@ -11,7 +11,10 @@ export type HotkeyAction =
   | 'fullscreen' | 'quit' | 'clear-log' | 'refresh'
   | 'toggle-playlist' | 'toggle-center'
   | 'view-single' | 'view-dual-ltr' | 'view-dual-rtl' | 'view-scroll'
-  | 'rename' | 'escape';
+  | 'rename' | 'escape'
+  // Mode switches + playlist operations (session 9)
+  | 'enter-compare' | 'enter-repack'
+  | 'toggle-shuffle' | 'randomize-playlist';
 
 interface UseHotkeysOptions {
   onAction: (action: HotkeyAction) => void;
@@ -31,9 +34,29 @@ export function useHotkeys({ onAction, includePageNav = false, disabled = false 
 
     const key = e.key;
     const ctrl = e.ctrlKey || e.metaKey;
+    const shift = e.shiftKey;
+    const alt = e.altKey;
 
-    // Ctrl combos
-    if (ctrl) {
+    // Ctrl+Shift combos (mode switches + shuffle toggle)
+    if (ctrl && shift && !alt) {
+      switch (key.toLowerCase()) {
+        case 'c': e.preventDefault(); onAction('enter-compare'); return;
+        case 'r': e.preventDefault(); onAction('enter-repack'); return;
+        case 's': e.preventDefault(); onAction('toggle-shuffle'); return;
+      }
+      return;
+    }
+
+    // Ctrl+Alt combos (playlist mutation)
+    if (ctrl && alt && !shift) {
+      switch (key.toLowerCase()) {
+        case 's': e.preventDefault(); onAction('randomize-playlist'); return;
+      }
+      return;
+    }
+
+    // Plain Ctrl combos (no shift, no alt)
+    if (ctrl && !shift && !alt) {
       switch (key.toLowerCase()) {
         case 'q': e.preventDefault(); onAction('quit'); return;
         case 'r': e.preventDefault(); onAction('refresh'); return;

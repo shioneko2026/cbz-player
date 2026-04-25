@@ -10,7 +10,7 @@ REM  Sort destination = this folder.
 REM ============================================================
 
 set "CBZ_SORTER_FOLDER=%~dp0"
-set "APP_DIR=H:\[02-AHW Data]\[Homebrew Programs]\CBZ Sorter Folder\CBZ Sorter NEW"
+set "APP_DIR=H:\[02-AHW Data]\[Homebrew Programs]\CBZ Player"
 
 cd /d "%APP_DIR%"
 call npx tsc -p tsconfig.node.json 2>nul

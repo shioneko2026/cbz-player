@@ -25,7 +25,7 @@
 ## Project structure
 
 ```
-CBZ Sorter NEW/
+CBZ Player/
   package.json
   tsconfig.json                # renderer TS config
   tsconfig.node.json           # main process TS config

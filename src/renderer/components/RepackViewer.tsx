@@ -80,9 +80,13 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
     return () => window.removeEventListener('click', handler);
   }, [contextMenu]);
 
-  // Ref forwarded to handleSave once it's defined below. Declared up here so
-  // the keydown effect can reference it without TDZ concerns.
-  const saveRef = useRef<() => void>(() => {});
+  // Ref forwarded to handleRepack once it's defined below. Declared up here so
+  // the keydown effect can reference it without TDZ concerns. Ctrl+S triggers
+  // the full "save and repack" action (writes the CBZ and exits repack mode),
+  // matching common editor convention where Ctrl+S commits and finalizes.
+  // The save-in-place ("Save" button) is still available via the on-screen
+  // button for users who want to commit changes without exiting.
+  const repackRef = useRef<() => void>(() => {});
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -108,16 +112,18 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
         setSelectedIndices(new Set(liveImages.map(e => e.index)));
         return;
       }
-      // Ctrl+S: save-in-place without exiting repack mode. Triggers the same
-      // handleSave the header / bottom-bar Save buttons use. preventDefault
-      // blocks the browser's "save page" prompt. stopPropagation + the local
-      // listener keep this from colliding with the global useHotkeys dispatcher.
+      // Ctrl+S: save and repack (writes the CBZ to disk and exits repack mode).
+      // Same as clicking the blue "Repack & Save" button at the bottom. The
+      // separate "Save" button (save-in-place, stays in repack) remains for
+      // users who want to commit without exiting. preventDefault blocks the
+      // browser's "save page" prompt. stopPropagation + the local listener
+      // keep this from colliding with the global useHotkeys dispatcher.
       // Explicitly NOT shift or alt — those combos mean toggle-shuffle and
       // randomize-playlist globally.
       if (e.key.toLowerCase() === 's' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
         e.preventDefault();
         e.stopPropagation();
-        saveRef.current();
+        repackRef.current();
         return;
       }
     };
@@ -204,10 +210,10 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
     onSave(keepIndices, renames, folderName, editableFileName);
   }, [liveImages, renames, folderName, editableFileName, onSave]);
 
-  // Keep saveRef.current pointed at the latest handleSave closure so the
-  // keydown listener above can call it without listing handleSave in its deps
+  // Keep repackRef.current pointed at the latest handleRepack closure so the
+  // keydown listener above can call it without listing handleRepack in its deps
   // (which would tear down and re-add the listener on every rename/folder edit).
-  useEffect(() => { saveRef.current = handleSave; }, [handleSave]);
+  useEffect(() => { repackRef.current = handleRepack; }, [handleRepack]);
 
   const bg = darkMode ? 'bg-zinc-950' : 'bg-zinc-100';
   const panelBg = darkMode ? 'bg-zinc-900' : 'bg-white';
@@ -415,6 +421,7 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
           <button
             onClick={handleRepack}
             disabled={liveImages.length === 0}
+            title="Save changes, write the CBZ to disk, and exit repack mode (Ctrl+S)"
             className={`${btnBase} bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40 disabled:cursor-not-allowed`}
           >
             Repack & Save ({liveImages.length} pages)

@@ -604,7 +604,7 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
                 ['Modes', [
                   ['Ctrl+Shift+C', 'Enter compare mode (pick with current)'],
                   ['Ctrl+Shift+R', 'Enter repack mode'],
-                  ['Ctrl+S', 'Save changes in repack mode (stays in mode)'],
+                  ['Ctrl+S', 'In repack mode: Repack & Save (write CBZ to disk and exit)'],
                   ['Escape', 'Exit current mode / cancel action'],
                 ]],
                 ['Playlist', [

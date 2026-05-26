@@ -34,13 +34,15 @@ export interface CategoryConfig {
  * File extensions we accept as "archive that might contain comic images."
  * The extractor itself uses magic bytes and doesn't care about extension,
  * so the only thing this filter controls is which on-disk files we'll even
- * try to load. .cbz is the primary; .zip is supported per user request so
- * the Repack verb (and drag-drop, folder scans, etc.) works on .zip files
- * that are effectively comic archives without the .cbz rename. Adding
- * .rar / .7z here would extend support to those formats too — the
- * extractor already handles them.
+ * try to load.
+ *   .cbz — primary, default file association, all right-click verbs
+ *   .zip / .rar / .7z — accepted everywhere internally (drag-drop, folder
+ *     scans, argv loading, Repack verb). Default Open verb NOT registered
+ *     on these (would clobber the user's existing archive-handler default
+ *     for every .zip / .rar / .7z on the system); user can opt in via
+ *     "Open with > Choose another app > Always use this app" if they want.
  */
-export const SUPPORTED_ARCHIVE_EXTS = ['.cbz', '.zip'];
+export const SUPPORTED_ARCHIVE_EXTS = ['.cbz', '.zip', '.rar', '.7z'];
 
 function hasSupportedExt(name: string): boolean {
   const lower = name.toLowerCase();

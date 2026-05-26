@@ -59,17 +59,24 @@
   WriteRegStr HKCU "Software\Classes\${PROGID}\shell\repack" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
   WriteRegStr HKCU "Software\Classes\${PROGID}\shell\repack\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --repack "%1"'
 
-  ; ── Verb 3b: "Repack with CBZ Player" on .zip files ─────────────────────
-  ; Same Repack verb, but added to .zip via SystemFileAssociations so it
-  ; works on .zip without disrupting the existing .zip default handler
-  ; (Windows compressed folder, 7-Zip, WinRAR, etc.). The verb just appears
-  ; as an additional right-click option alongside whatever else is there.
-  ; Label slightly different from the .cbz variant ("Repack with" vs "Repack
-  ; this CBZ") since these files are .zip and the "this CBZ" wording would
-  ; be wrong.
+  ; ── Verb 3b: "Repack with CBZ Player" on non-.cbz archive types ─────────
+  ; Same Repack verb, added to .zip / .rar / .7z via SystemFileAssociations
+  ; so it works on those without disrupting their existing default handlers
+  ; (Windows compressed folder, 7-Zip, WinRAR, etc.). The verb appears as
+  ; an additional right-click option alongside whatever else is registered.
+  ; Label is "Repack with CBZ Player" rather than ".cbz variant's 'Repack
+  ; this CBZ'" since these files aren't .cbz and the "this CBZ" wording
+  ; would be technically wrong. The extractor uses magic bytes so all four
+  ; formats decompress the same way internally.
   WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.zip\shell\repack" "" "Repack with CBZ Player"
   WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.zip\shell\repack" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
   WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.zip\shell\repack\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --repack "%1"'
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.rar\shell\repack" "" "Repack with CBZ Player"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.rar\shell\repack" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.rar\shell\repack\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --repack "%1"'
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.7z\shell\repack" "" "Repack with CBZ Player"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.7z\shell\repack" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.7z\shell\repack\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --repack "%1"'
 
   ; ── Verb 3: "Open in CBZ Player" (folder context menu) ───────────────────
   ; Shows on right-click of any FOLDER (not .cbz files). Scans the folder
@@ -95,6 +102,8 @@
   DeleteRegKey HKCU "Software\Classes\Directory\shell\OpenInCbzPlayer"
   DeleteRegKey HKCU "Software\Classes\Directory\Background\shell\OpenInCbzPlayer"
   DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.zip\shell\repack"
+  DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.rar\shell\repack"
+  DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.7z\shell\repack"
   ; Belt-and-suspenders: clean any leftover from the broken-ProgID era.
   DeleteRegKey HKCU "Software\Classes\${APP_EXECUTABLE_FILENAME}.cbz"
 !macroend

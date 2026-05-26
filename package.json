@@ -1,6 +1,6 @@
 {
   "name": "cbz-player-v5",
-  "version": "5.0.0",
+  "version": "0.9.0",
   "description": "CBZ comic reader with built-in playlist, sort hotkeys, side-by-side compare, and in-place repack",
   "main": "dist/main/index.js",
   "scripts": {
@@ -13,7 +13,44 @@
     "build:main": "tsc -p tsconfig.node.json",
     "build": "npm run build:renderer && npm run build:main",
     "start": "electron .",
-    "pack": "npm run build && electron-builder --win portable"
+    "pack": "npm run build && electron-builder --win nsis"
+  },
+  "build": {
+    "appId": "com.shio.cbz-player",
+    "productName": "CBZ Player",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "CBZ Player",
+      "include": "build/installer.nsh",
+      "deleteAppDataOnUninstall": false
+    },
+    "fileAssociations": [
+      {
+        "ext": "cbz",
+        "name": "CBZ Archive",
+        "description": "Comic book archive",
+        "role": "Viewer",
+        "icon": "build/icon.ico"
+      }
+    ]
   },
   "keywords": [],
   "author": "",

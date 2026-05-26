@@ -30,9 +30,13 @@
   ; conditional on selection-count without a shell extension DLL — too heavy
   ; for v1). When invoked with != 2 files the main process gracefully falls
   ; back to a normal playlist load with a log entry explaining what happened.
+  ; NOTE: ${APP_EXECUTABLE_FILENAME} already INCLUDES the .exe extension on
+  ; Windows. Appending another `.exe` produces `CBZ Player.exe.exe` which
+  ; doesn't exist and triggers the Windows "no app associated" error.
+  ; (Burned by this in the first 0.9.0 install — see HANDOFF gotcha.)
   WriteRegStr HKCU "Software\Classes\${PROGID}\shell\compare" "" "Compare in CBZ Player"
-  WriteRegStr HKCU "Software\Classes\${PROGID}\shell\compare" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME}.exe,0"
-  WriteRegStr HKCU "Software\Classes\${PROGID}\shell\compare\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}.exe" --compare "%1"'
+  WriteRegStr HKCU "Software\Classes\${PROGID}\shell\compare" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
+  WriteRegStr HKCU "Software\Classes\${PROGID}\shell\compare\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --compare "%1"'
 !macroend
 
 !macro customUnInstall

@@ -180,11 +180,11 @@ function usePlaylistState() {
   const [compareLeftIndex, setCompareLeftIndex] = useState<number | null>(null); // For pick-two mode
   const [comparePickMode, setComparePickMode] = useState(false); // Pick one (compare with current)
   const [comparePickTwoMode, setComparePickTwoMode] = useState(false); // Pick two files
-  // Ad-hoc compare: files outside the playlist (e.g. from Explorer right-click → Compare).
-  // When both set, the compare extraction effect uses these instead of pulling files from
-  // playlist indices; the playlist is left untouched. Cleared on exitCompare().
-  const [adhocCompareLeft, setAdhocCompareLeft] = useState<FileInfo | null>(null);
-  const [adhocCompareRight, setAdhocCompareRight] = useState<FileInfo | null>(null);
+  // (Previously had `adhocCompareLeft/Right` state for Explorer-launched compare
+  // that bypassed the playlist. Removed in Phase 11 follow-up — user wanted the
+  // Compare-from-Explorer files to actually land in the playlist so rename and
+  // repack are accessible. enterAdhocCompare now appends to the playlist first,
+  // then uses the regular playlist-based compare path.)
 
   const startRenaming = useCallback(() => {
     setRenamingIndex(currentIndexRef.current);
@@ -485,16 +485,36 @@ function usePlaylistState() {
     setCompareLeftIndex(null);
   }, []);
 
-  // Enter compare with two files that don't have to be in the current playlist.
-  // Used by the Explorer "Compare in CBZ Player" verb dispatched from main on
-  // a multi-select of 2 .cbz files. Playlist stays intact; on exit, ad-hoc
-  // state clears and the user returns to whatever they were doing.
+  // Enter compare with two files invoked from Explorer's "Compare in CBZ Player"
+  // verb. Per user request (Phase 11 follow-up): both files get APPENDED to the
+  // current playlist (deduped) so they're available for rename, repack, and
+  // other playlist-bound actions after the user exits compare. Then we enter
+  // the regular playlist-based compare using their indices.
   const enterAdhocCompare = useCallback((left: FileInfo, right: FileInfo) => {
-    setAdhocCompareLeft(left);
-    setAdhocCompareRight(right);
-    setCompareMode(true);
-    // Don't touch compareFileIndex / compareLeftIndex / pick modes — those are
-    // for playlist-based compare and shouldn't be set in the ad-hoc path.
+    // Build the updated playlist by appending left and right if not already present.
+    setFiles(prev => {
+      const existing = new Set(prev.map(f => f.fullPath));
+      const toAppend: FileInfo[] = [];
+      if (!existing.has(left.fullPath)) toAppend.push(left);
+      if (!existing.has(right.fullPath) && right.fullPath !== left.fullPath) toAppend.push(right);
+      const updated = toAppend.length > 0 ? [...prev, ...toAppend] : prev;
+
+      // Find each file's index in the now-updated playlist.
+      const leftIdx = updated.findIndex(f => f.fullPath === left.fullPath);
+      const rightIdx = updated.findIndex(f => f.fullPath === right.fullPath);
+      if (leftIdx === -1 || rightIdx === -1) return prev; // shouldn't happen
+
+      // Set the playlist-based compare indices and enter compare mode. Using
+      // compareLeftIndex (pick-two semantic) so the cursor doesn't jump to
+      // the left file's index — the user's currentIndex stays where it was.
+      setCompareLeftIndex(leftIdx);
+      setCompareFileIndex(rightIdx);
+      setCompareMode(true);
+
+      // Broadcast the new playlist so the detached window updates too.
+      window.electronAPI?.broadcastState({ files: updated });
+      return updated;
+    });
   }, []);
 
   const exitCompare = useCallback(() => {
@@ -503,8 +523,6 @@ function usePlaylistState() {
     setComparePickMode(false);
     setComparePickTwoMode(false);
     setCompareLeftIndex(null);
-    setAdhocCompareLeft(null);
-    setAdhocCompareRight(null);
     window.electronAPI?.cleanupCbz('compare-left');
     window.electronAPI?.cleanupCbz('compare-right');
   }, []);
@@ -575,7 +593,7 @@ function usePlaylistState() {
     lastUndo, handleUndo,
     handleDeleteFiles, handleRemoveFromPlaylist,
     compareMode, compareFileIndex, comparePickMode, comparePickTwoMode, compareLeftIndex,
-    adhocCompareLeft, adhocCompareRight, enterAdhocCompare,
+    enterAdhocCompare,
     startCompareWithFile, cycleComparePick, cancelComparePick, exitCompare, enterComparePickMode,
     randomizePlaylist,
     categories, setCategories,
@@ -612,29 +630,16 @@ function ViewerWindow() {
   const [compareRightId, setCompareRightId] = useState('');
   const [compareSwapped, setCompareSwapped] = useState(false);
 
-  // Start compare mode: extract both files. Two paths:
-  //  (a) Ad-hoc compare (Explorer-launched) — files passed via `adhocCompareLeft/Right`,
-  //      not in the playlist. Takes precedence when both are set.
-  //  (b) Playlist-based compare — files indexed via `compareFileIndex` and
-  //      `compareLeftIndex` (pick-two) or `currentIndex` (pick-one).
+  // Start compare mode: extract both files from playlist indices. "Left" file
+  // is compareLeftIndex when set (pick-two or Explorer-launched) or
+  // currentIndex (pick-one). Reading from state, not refs — pick-two doesn't
+  // sync ViewerWindow's indexRef.
   useEffect(() => {
-    if (!ps.compareMode || !window.electronAPI) return;
+    if (!ps.compareMode || ps.compareFileIndex === null || !window.electronAPI) return;
 
-    let leftFile: FileInfo | null = null;
-    let rightFile: FileInfo | null = null;
-
-    if (ps.adhocCompareLeft && ps.adhocCompareRight) {
-      // Ad-hoc path — files are independent of the playlist.
-      leftFile = ps.adhocCompareLeft;
-      rightFile = ps.adhocCompareRight;
-    } else if (ps.compareFileIndex !== null) {
-      // Playlist-based path. "Left" file is compareLeftIndex when set (pick-two)
-      // or currentIndex (pick-one). Reading from state, not refs — pick-two
-      // doesn't sync ViewerWindow's indexRef.
-      const leftIdx = ps.compareLeftIndex ?? ps.currentIndex;
-      leftFile = ps.files[leftIdx] ?? null;
-      rightFile = ps.files[ps.compareFileIndex] ?? null;
-    }
+    const leftIdx = ps.compareLeftIndex ?? ps.currentIndex;
+    const leftFile = ps.files[leftIdx] ?? null;
+    const rightFile = ps.files[ps.compareFileIndex] ?? null;
 
     if (!leftFile || !rightFile) return;
 
@@ -647,12 +652,12 @@ function ViewerWindow() {
 
     (async () => {
       try {
-        const leftResult = await window.electronAPI.extractCbz(leftFile!.fullPath, 'compare-left');
+        const leftResult = await window.electronAPI.extractCbz(leftFile.fullPath, 'compare-left');
         if (!ps.compareMode) return;
         setCompareLeftImages(leftResult.images);
         setCompareLeftId(leftResult.extractionId ?? '');
 
-        const rightResult = await window.electronAPI.extractCbz(rightFile!.fullPath, 'compare-right');
+        const rightResult = await window.electronAPI.extractCbz(rightFile.fullPath, 'compare-right');
         if (!ps.compareMode) return;
         setCompareRightImages(rightResult.images);
         setCompareRightId(rightResult.extractionId ?? '');
@@ -660,7 +665,7 @@ function ViewerWindow() {
         console.error('Compare extraction failed:', err);
       }
     })();
-  }, [ps.compareMode, ps.compareFileIndex, ps.adhocCompareLeft, ps.adhocCompareRight]);
+  }, [ps.compareMode, ps.compareFileIndex, ps.compareLeftIndex]);
 
   const doExtract = useCallback((filePath: string) => {
     if (!filePath || !window.electronAPI) return;
@@ -1100,12 +1105,12 @@ function ViewerWindow() {
   useHotkeys({ onAction: handleAction, includePageNav: true, disabled: settingsOpen });
 
   const currentFile = ps.files[ps.currentIndex] ?? null;
-  // "Left"/"right" files in compare mode. Ad-hoc compare (Explorer-launched) takes
-  // precedence — those files don't live in the playlist. Otherwise: pick-two uses
-  // compareLeftIndex, pick-one uses currentIndex; right is always compareFileIndex.
+  // "Left"/"right" files in compare mode. Pick-two and Explorer-launched compare
+  // both use compareLeftIndex; pick-one uses currentIndex. Right is always
+  // compareFileIndex.
   const compareLeftFileIdx = ps.compareLeftIndex ?? ps.currentIndex;
-  const compareLeftFile = ps.adhocCompareLeft ?? (ps.files[compareLeftFileIdx] ?? null);
-  const compareRightFile = ps.adhocCompareRight ?? (ps.compareFileIndex !== null ? (ps.files[ps.compareFileIndex] ?? null) : null);
+  const compareLeftFile = ps.files[compareLeftFileIdx] ?? null;
+  const compareRightFile = ps.compareFileIndex !== null ? (ps.files[ps.compareFileIndex] ?? null) : null;
   const showDockedPanel = ps.isDocked && playlistVisible;
   // Center-page offset: shift viewer content left by half the panel width
   const toggleWidth = ps.isDocked ? 12 : 0;

@@ -5,7 +5,7 @@ import fs from 'fs';
 import { execFile } from 'child_process';
 import sevenBin from '7zip-bin';
 import { createViewerWindow, createPlaylistWindow, getViewerWindow, getPlaylistWindow, getWindowBounds, sendToAll, setImmerseEnabled, destroyAllBlackouts } from './window-manager';
-import { scanForCbzFiles, getFileInfoFromPaths, detectSortDestination, ensureSortFolders, sortFile, unsortFile, moveToHolding, cleanupHoldingSubfolder, listStrandedHoldingFiles, renameFile, resolveCategoryBasePath, DEFAULT_CATEGORIES } from './file-operations';
+import { scanForCbzFiles, getFileInfoFromPaths, detectSortDestination, ensureSortFolders, sortFile, unsortFile, moveToHolding, cleanupHoldingSubfolder, listStrandedHoldingFiles, renameFile, resolveCategoryBasePath, DEFAULT_CATEGORIES, SUPPORTED_ARCHIVE_EXTS } from './file-operations';
 import { loadConfig, saveConfig } from './config-store';
 import { extractCbz, cleanupTemp, cleanupSlot, resolveImage, getSlotSources, getSlotNames, hasSlot, type ImageSource } from './cbz-extractor';
 import { saveSessionLog } from './session-logger';
@@ -109,11 +109,6 @@ function parseExplorerArgv(argv: string[]): PendingArg[] {
   const isRepack = argv.includes('--repack');
   const myExePathLower = process.execPath.toLowerCase();
   const paths: PendingArg[] = [];
-  // Accepted file extensions for non-folder verbs. .cbz is the primary;
-  // .zip is supported for the Repack verb (and falls through harmlessly
-  // for other verbs since the verb is registered only on .cbz + .zip).
-  // The extractor uses magic bytes anyway, so .zip works internally.
-  const ACCEPTED_EXTS = ['.cbz', '.zip'];
   for (const token of argv) {
     if (!token || token.startsWith('--')) continue;
     // Skip our own executable (always argv[0]; also defensive against
@@ -132,7 +127,7 @@ function parseExplorerArgv(argv: string[]): PendingArg[] {
       } catch {}
     } else {
       const lower = token.toLowerCase();
-      if (ACCEPTED_EXTS.some(ext => lower.endsWith(ext))) {
+      if (SUPPORTED_ARCHIVE_EXTS.some(ext => lower.endsWith(ext))) {
         paths.push({ path: token, isCompare, isAppend, isFolder, isRepack });
       }
     }

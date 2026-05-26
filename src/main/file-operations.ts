@@ -30,6 +30,23 @@ export interface CategoryConfig {
   outputPath?: string;
 }
 
+/**
+ * File extensions we accept as "archive that might contain comic images."
+ * The extractor itself uses magic bytes and doesn't care about extension,
+ * so the only thing this filter controls is which on-disk files we'll even
+ * try to load. .cbz is the primary; .zip is supported per user request so
+ * the Repack verb (and drag-drop, folder scans, etc.) works on .zip files
+ * that are effectively comic archives without the .cbz rename. Adding
+ * .rar / .7z here would extend support to those formats too — the
+ * extractor already handles them.
+ */
+export const SUPPORTED_ARCHIVE_EXTS = ['.cbz', '.zip'];
+
+function hasSupportedExt(name: string): boolean {
+  const lower = name.toLowerCase();
+  return SUPPORTED_ARCHIVE_EXTS.some(ext => lower.endsWith(ext));
+}
+
 export const DEFAULT_CATEGORIES: CategoryConfig[] = [
   { id: 'keep', label: 'Keep', folderName: '[00-Keep]', hotkey: 'k', color: 'emerald', dupeFolderName: '[Keep Dupes]' },
   { id: 'purge', label: 'Purge', folderName: '', hotkey: 'p', color: 'red', isPurge: true },
@@ -40,7 +57,9 @@ export const DEFAULT_CATEGORIES: CategoryConfig[] = [
 ];
 
 /**
- * Scan a folder for .cbz files, sorted alphabetically (natural sort).
+ * Scan a folder for supported archive files (see SUPPORTED_ARCHIVE_EXTS),
+ * sorted alphabetically (natural sort). Used by drag-drop folder load,
+ * the env-var auto-load, and the Explorer "Open in CBZ Player" folder verb.
  */
 export function scanForCbzFiles(folderPath: string): FileInfo[] {
   if (!fs.existsSync(nsp(folderPath))) return [];
@@ -49,7 +68,7 @@ export function scanForCbzFiles(folderPath: string): FileInfo[] {
   const cbzFiles: FileInfo[] = [];
 
   for (const entry of entries) {
-    if (entry.isFile() && entry.name.toLowerCase().endsWith('.cbz')) {
+    if (entry.isFile() && hasSupportedExt(entry.name)) {
       const fullPath = path.join(folderPath, entry.name);
       try {
         const stat = fs.statSync(nsp(fullPath));
@@ -72,13 +91,13 @@ export function scanForCbzFiles(folderPath: string): FileInfo[] {
 
 /**
  * Build FileInfo objects from an array of specific file paths.
- * Filters to only .cbz files that exist.
+ * Filters to supported archive extensions that exist on disk.
  */
 export function getFileInfoFromPaths(filePaths: string[]): FileInfo[] {
   const cbzFiles: FileInfo[] = [];
 
   for (const fp of filePaths) {
-    if (!fp.toLowerCase().endsWith('.cbz')) continue;
+    if (!hasSupportedExt(fp)) continue;
     try {
       const stat = fs.statSync(nsp(fp));
       if (stat.isFile()) {

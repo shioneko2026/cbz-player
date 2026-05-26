@@ -51,6 +51,26 @@
   WriteRegStr HKCU "Software\Classes\${PROGID}\shell\addtoplaylist" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
   WriteRegStr HKCU "Software\Classes\${PROGID}\shell\addtoplaylist\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --append "%1"'
 
+  ; ── Verb 3a: "Repack this CBZ" on .cbz files ────────────────────────────
+  ; Shows on right-click of any .cbz. Loads the file into the playlist,
+  ; extracts, and enters repack mode automatically once extraction completes.
+  ; Single-file operation — if user multi-selects, only the first is taken.
+  WriteRegStr HKCU "Software\Classes\${PROGID}\shell\repack" "" "Repack this CBZ"
+  WriteRegStr HKCU "Software\Classes\${PROGID}\shell\repack" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
+  WriteRegStr HKCU "Software\Classes\${PROGID}\shell\repack\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --repack "%1"'
+
+  ; ── Verb 3b: "Repack with CBZ Player" on .zip files ─────────────────────
+  ; Same Repack verb, but added to .zip via SystemFileAssociations so it
+  ; works on .zip without disrupting the existing .zip default handler
+  ; (Windows compressed folder, 7-Zip, WinRAR, etc.). The verb just appears
+  ; as an additional right-click option alongside whatever else is there.
+  ; Label slightly different from the .cbz variant ("Repack with" vs "Repack
+  ; this CBZ") since these files are .zip and the "this CBZ" wording would
+  ; be wrong.
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.zip\shell\repack" "" "Repack with CBZ Player"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.zip\shell\repack" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.zip\shell\repack\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --repack "%1"'
+
   ; ── Verb 3: "Open in CBZ Player" (folder context menu) ───────────────────
   ; Shows on right-click of any FOLDER (not .cbz files). Scans the folder
   ; for .cbz files and loads them all as a fresh playlist. The folder path
@@ -71,8 +91,10 @@
   ; own uninstall logic based on the fileAssociations config.
   DeleteRegKey HKCU "Software\Classes\${PROGID}\shell\compare"
   DeleteRegKey HKCU "Software\Classes\${PROGID}\shell\addtoplaylist"
+  DeleteRegKey HKCU "Software\Classes\${PROGID}\shell\repack"
   DeleteRegKey HKCU "Software\Classes\Directory\shell\OpenInCbzPlayer"
   DeleteRegKey HKCU "Software\Classes\Directory\Background\shell\OpenInCbzPlayer"
+  DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.zip\shell\repack"
   ; Belt-and-suspenders: clean any leftover from the broken-ProgID era.
   DeleteRegKey HKCU "Software\Classes\${APP_EXECUTABLE_FILENAME}.cbz"
 !macroend

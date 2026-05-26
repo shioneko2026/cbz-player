@@ -31,6 +31,7 @@ export interface AppConfig {
   darkBgBrightness: number;
   lightBgBrightness: number;
   writeLogsEnabled: boolean;
+  minLogSessionMinutes: number;
   repackColumns: number;
   repackThumbnailSize: number;
   repackPanelWidth: number;
@@ -58,6 +59,7 @@ const DEFAULT_CONFIG: AppConfig = {
   darkBgBrightness: 26,
   lightBgBrightness: 232,
   writeLogsEnabled: false,
+  minLogSessionMinutes: 5,
   repackColumns: 3,
   repackThumbnailSize: 150,
   repackPanelWidth: 40,

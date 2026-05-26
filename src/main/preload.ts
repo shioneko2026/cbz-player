@@ -97,4 +97,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onExplorerCompare: (callback: (payload: { left: any; right: any }) => void) => {
     ipcRenderer.on('explorer:compare', (_event, payload) => callback(payload));
   },
+  onExplorerRepack: (callback: (payload: { file: any }) => void) => {
+    ipcRenderer.on('explorer:repack', (_event, payload) => callback(payload));
+  },
 });

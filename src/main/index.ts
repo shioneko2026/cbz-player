@@ -77,7 +77,7 @@ if (!singleInstanceGotLock) {
 // 400ms tested empirically: short enough to feel responsive on single-file
 // double-click, long enough to catch the spread-out second-instance arrivals
 // on 10+ multi-selects.
-type PendingArg = { path: string; isCompare: boolean; isAppend: boolean; isFolder: boolean };
+type PendingArg = { path: string; isCompare: boolean; isAppend: boolean; isFolder: boolean; isRepack: boolean };
 let pendingArgs: PendingArg[] = [];
 let pendingFlushTimer: NodeJS.Timeout | null = null;
 const PENDING_FLUSH_DEBOUNCE_MS = 400;
@@ -106,8 +106,14 @@ function parseExplorerArgv(argv: string[]): PendingArg[] {
   const isCompare = argv.includes('--compare');
   const isAppend = argv.includes('--append');
   const isFolder = argv.includes('--folder');
+  const isRepack = argv.includes('--repack');
   const myExePathLower = process.execPath.toLowerCase();
   const paths: PendingArg[] = [];
+  // Accepted file extensions for non-folder verbs. .cbz is the primary;
+  // .zip is supported for the Repack verb (and falls through harmlessly
+  // for other verbs since the verb is registered only on .cbz + .zip).
+  // The extractor uses magic bytes anyway, so .zip works internally.
+  const ACCEPTED_EXTS = ['.cbz', '.zip'];
   for (const token of argv) {
     if (!token || token.startsWith('--')) continue;
     // Skip our own executable (always argv[0]; also defensive against
@@ -115,17 +121,20 @@ function parseExplorerArgv(argv: string[]): PendingArg[] {
     if (token.toLowerCase() === myExePathLower) continue;
     if (token === '.') continue;
     if (isFolder) {
-      // Folder verb: %1 is a directory path, not a .cbz. Confirm by stat
+      // Folder verb: %1 is a directory path, not a file. Confirm by stat
       // before queueing — protects against weird argv structure (e.g. a
       // file passed instead of a folder; falls through to "no usable path"
       // rather than crashing on scandir later).
       try {
         if (fs.existsSync(token) && fs.statSync(token).isDirectory()) {
-          paths.push({ path: token, isCompare, isAppend, isFolder });
+          paths.push({ path: token, isCompare, isAppend, isFolder, isRepack });
         }
       } catch {}
-    } else if (token.toLowerCase().endsWith('.cbz')) {
-      paths.push({ path: token, isCompare, isAppend, isFolder });
+    } else {
+      const lower = token.toLowerCase();
+      if (ACCEPTED_EXTS.some(ext => lower.endsWith(ext))) {
+        paths.push({ path: token, isCompare, isAppend, isFolder, isRepack });
+      }
     }
   }
   return paths;
@@ -181,6 +190,7 @@ function flushExplorerArgs() {
   const compareFlagged = batch.some(a => a.isCompare);
   const appendFlagged = batch.some(a => a.isAppend);
   const folderFlagged = batch.some(a => a.isFolder);
+  const repackFlagged = batch.some(a => a.isRepack);
   const allPaths = batch.map(a => a.path);
   // Dedupe while preserving order — Explorer can fire the same path twice
   // under certain shell extensions.
@@ -219,6 +229,19 @@ function flushExplorerArgs() {
     }
     // Files couldn't be statted (deleted between right-click and dispatch).
     // Fall through to the open path so at least something happens.
+  }
+
+  if (repackFlagged && paths.length >= 1) {
+    // Repack verb: single-file edit operation. If user multi-selected, we
+    // only take the first — repacking N files in one shot isn't a thing.
+    // Renderer appends the file to the playlist, switches cursor to it,
+    // extracts, and enters repack mode once extraction completes.
+    const files = getFileInfoFromPaths([paths[0]]);
+    if (files.length === 1) {
+      lastFlushTime = Date.now();
+      vw.webContents.send('explorer:repack', { file: files[0] });
+      return;
+    }
   }
 
   // Default Open path. Mode selection:

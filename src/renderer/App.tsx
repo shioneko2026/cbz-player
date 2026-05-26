@@ -48,6 +48,7 @@ declare global {
       onPlaylistAction: (callback: (action: any) => void) => void;
       onExplorerOpen: (callback: (payload: { files: FileInfo[]; mode: 'replace' | 'append'; sortDestination: string | null }) => void) => void;
       onExplorerCompare: (callback: (payload: { left: FileInfo; right: FileInfo }) => void) => void;
+      onExplorerRepack: (callback: (payload: { file: FileInfo }) => void) => void;
     };
   }
 }
@@ -820,6 +821,11 @@ function ViewerWindow() {
   const [controlBarMode, setControlBarMode] = useState<'auto-hide' | 'hover-only' | 'always-visible'>('auto-hide');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [repackMode, setRepackMode] = useState(false);
+  // Path of a file the user invoked Explorer's "Repack this CBZ" verb on,
+  // waiting for its extraction to complete. Once `images.length > 0` and the
+  // viewer's current file matches this path, we flip into repack mode and
+  // clear this state.
+  const [pendingRepackPath, setPendingRepackPath] = useState<string | null>(null);
   const [savedLogHeight, setSavedLogHeight] = useState(112);
   const [darkBgBrightness, setDarkBgBrightness] = useState(26);
   const [lightBgBrightness, setLightBgBrightness] = useState(232);
@@ -1001,9 +1007,10 @@ function ViewerWindow() {
 
   // Explorer launch dispatch (main → viewer): files arrive here after main has
   // batched a cold-start or second-instance argv via its debounce, parsed the
-  // --compare flag, and resolved paths to FileInfo. We route to the same
-  // semantics the in-app drag-drop uses (single = replace, multi = append) or
-  // to ad-hoc compare (preserves existing playlist).
+  // flags, and resolved paths to FileInfo. We route to the same semantics the
+  // in-app drag-drop uses (single = replace, multi = append) or to ad-hoc
+  // compare (appends to playlist + enters compare) or to repack (appends,
+  // switches cursor, waits for extraction, enters repack mode).
   useEffect(() => {
     if (!window.electronAPI) return;
     if (typeof (window.electronAPI as any).onExplorerOpen !== 'function') return;
@@ -1019,7 +1026,55 @@ function ViewerWindow() {
       if (!left || !right) return;
       ps.enterAdhocCompare(left, right);
     });
-  }, [handleViewerDrop, handlePlaylistDrop, ps.enterAdhocCompare]);
+    if (typeof (window.electronAPI as any).onExplorerRepack === 'function') {
+      window.electronAPI.onExplorerRepack(({ file }) => {
+        if (!file) return;
+        // Append the file to the playlist (dedup), switch cursor to it,
+        // kick off extraction. The pendingRepackPath state + the watcher
+        // useEffect below will flip into repack mode once images arrive.
+        const currentFiles = filesRef.current;
+        const existingIdx = currentFiles.findIndex(f => f.fullPath === file.fullPath);
+        if (existingIdx >= 0) {
+          // Already in playlist — just jump to it and extract.
+          ps.setCurrentIndex(existingIdx);
+          indexRef.current = existingIdx;
+          doExtract(file.fullPath);
+        } else {
+          const updated = [...currentFiles, file];
+          ps.setFiles(updated);
+          filesRef.current = updated;
+          const newIdx = updated.length - 1;
+          ps.setCurrentIndex(newIdx);
+          indexRef.current = newIdx;
+          window.electronAPI?.broadcastState({ files: updated, currentIndex: newIdx });
+          doExtract(file.fullPath);
+        }
+        setPendingRepackPath(file.fullPath);
+      });
+    }
+  }, [handleViewerDrop, handlePlaylistDrop, ps.enterAdhocCompare, doExtract]);
+
+  // Watcher: when Explorer's "Repack this CBZ" verb fires we set
+  // `pendingRepackPath` and kick off extraction. Repack mode requires
+  // `images.length > 0` (Settings/state guard in the dispatcher and the
+  // RepackViewer itself), so we can't enter repack until extraction
+  // completes. This effect flips us in once that's true for the file we
+  // asked about, then clears the pending flag.
+  useEffect(() => {
+    if (!pendingRepackPath) return;
+    if (extracting) return;
+    if (images.length === 0) return;
+    const currentFile = ps.files[ps.currentIndex];
+    if (!currentFile || currentFile.fullPath !== pendingRepackPath) return;
+    // Avoid colliding with compare mode — don't auto-enter repack from
+    // underneath a comparison. User can exit compare and re-invoke if needed.
+    if (ps.compareMode || ps.comparePickMode || ps.comparePickTwoMode) {
+      setPendingRepackPath(null);
+      return;
+    }
+    setRepackMode(true);
+    setPendingRepackPath(null);
+  }, [pendingRepackPath, extracting, images.length, ps.files, ps.currentIndex, ps.compareMode, ps.comparePickMode, ps.comparePickTwoMode]);
 
   const handleAction = useCallback((action: HotkeyAction) => {
     const viewer = (window as any).__cbzViewer;

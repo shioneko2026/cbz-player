@@ -119,9 +119,23 @@ function flushExplorerArgs() {
 
   const vw = getViewerWindow();
   if (!vw || vw.isDestroyed()) {
-    // Renderer not ready yet. Re-queue and try again shortly.
+    // Window not created yet (cold start, very early). Re-queue and try
+    // again shortly.
     pendingArgs.push(...batch);
     pendingFlushTimer = setTimeout(flushExplorerArgs, 250);
+    return;
+  }
+  if (vw.webContents.isLoading()) {
+    // Window exists but the renderer is still loading the HTML / mounting
+    // React. If we send IPC now, the onExplorerOpen / onExplorerCompare
+    // listeners (registered in a useEffect after first mount) aren't there
+    // yet and the messages get dropped silently. Wait for did-finish-load
+    // + a small buffer to let React's useEffect commit (matches the existing
+    // env-var auto-load pattern in this file).
+    pendingArgs.push(...batch);
+    vw.webContents.once('did-finish-load', () => {
+      setTimeout(flushExplorerArgs, 500);
+    });
     return;
   }
 

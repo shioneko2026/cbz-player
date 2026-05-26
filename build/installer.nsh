@@ -33,7 +33,12 @@
   ; playlist load with a log entry explaining what happened.
   ; NOTE: ${APP_EXECUTABLE_FILENAME} already INCLUDES the .exe extension.
   ; Appending another .exe produces "CBZ Player.exe.exe" which doesn't exist.
-  WriteRegStr HKCU "Software\Classes\${PROGID}\shell\compare" "" "Compare in CBZ Player"
+  ; Label says "Compare 2" so the user knows the verb needs exactly 2 files
+  ; selected. We can't conditionally hide the verb based on selection count
+  ; without a shell extension DLL (rejected as overkill for v1) — explicit
+  ; label is the cheap-but-clear alternative. Invocation with !=2 files
+  ; gracefully falls back to a normal Open (no error dialog).
+  WriteRegStr HKCU "Software\Classes\${PROGID}\shell\compare" "" "Compare 2 in CBZ Player"
   WriteRegStr HKCU "Software\Classes\${PROGID}\shell\compare" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
   WriteRegStr HKCU "Software\Classes\${PROGID}\shell\compare\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --compare "%1"'
 

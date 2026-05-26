@@ -10,25 +10,37 @@
 ;
 ; Per-user install (HKCU), no admin elevation. All keys are removed on
 ; uninstall.
+;
+; PROGID NOTE: electron-builder uses the `name` field from fileAssociations
+; (here: "CBZ Archive") AS the registry ProgID key — NOT the convention
+; `<exe>.<ext>` we initially assumed. Empirically verified by inspecting
+; HKCU\Software\Classes\ after install. The Compare verb must be written
+; under the SAME ProgID Windows actually consults when reading verbs for
+; .cbz files, or it never appears in the right-click menu.
+
+!define PROGID "CBZ Archive"
 
 !macro customInstall
+  ; Migration: an earlier (broken) installer wrote the Compare verb under the
+  ; wrong ProgID `<exe>.cbz`. Clean that up so users who installed the broken
+  ; build don't have stale keys after upgrading.
+  DeleteRegKey HKCU "Software\Classes\${APP_EXECUTABLE_FILENAME}.cbz"
+
   ; Compare verb. Shows on right-click of any .cbz (visibility can't be
   ; conditional on selection-count without a shell extension DLL — too heavy
   ; for v1). When invoked with != 2 files the main process gracefully falls
   ; back to a normal playlist load with a log entry explaining what happened.
-  ;
-  ; The ProgID under fileAssociations defaults to "${APP_EXECUTABLE_FILENAME}.cbz"
-  ; per electron-builder convention. Subclass key lives under that ProgID's
-  ; shell\compare.
-  WriteRegStr HKCU "Software\Classes\${APP_EXECUTABLE_FILENAME}.cbz\shell\compare" "" "Compare in CBZ Player"
-  WriteRegStr HKCU "Software\Classes\${APP_EXECUTABLE_FILENAME}.cbz\shell\compare" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME}.exe,0"
-  WriteRegStr HKCU "Software\Classes\${APP_EXECUTABLE_FILENAME}.cbz\shell\compare\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}.exe" --compare "%1"'
+  WriteRegStr HKCU "Software\Classes\${PROGID}\shell\compare" "" "Compare in CBZ Player"
+  WriteRegStr HKCU "Software\Classes\${PROGID}\shell\compare" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME}.exe,0"
+  WriteRegStr HKCU "Software\Classes\${PROGID}\shell\compare\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}.exe" --compare "%1"'
 !macroend
 
 !macro customUnInstall
   ; Remove the Compare verb registry entries. The default Open verb (and the
   ; .cbz association itself) are removed by electron-builder's own uninstall
   ; logic based on the fileAssociations config.
-  DeleteRegKey HKCU "Software\Classes\${APP_EXECUTABLE_FILENAME}.cbz\shell\compare\command"
-  DeleteRegKey HKCU "Software\Classes\${APP_EXECUTABLE_FILENAME}.cbz\shell\compare"
+  DeleteRegKey HKCU "Software\Classes\${PROGID}\shell\compare\command"
+  DeleteRegKey HKCU "Software\Classes\${PROGID}\shell\compare"
+  ; Also belt-and-suspenders: clean any leftover from the broken-ProgID era.
+  DeleteRegKey HKCU "Software\Classes\${APP_EXECUTABLE_FILENAME}.cbz"
 !macroend

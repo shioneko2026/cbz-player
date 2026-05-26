@@ -1,4 +1,4 @@
-import { BrowserWindow, screen, Display } from 'electron';
+import { app, BrowserWindow, screen, Display } from 'electron';
 import path from 'path';
 import { WindowBounds } from './config-store';
 
@@ -156,13 +156,22 @@ export function destroyAllBlackouts(): void {
   setImmerseEnabled(false);
 }
 
-const isDev = process.env.NODE_ENV !== 'production';
+// Use Electron's own `isPackaged` for the dev-vs-prod split. Previously this
+// used `NODE_ENV !== 'production'`, but NODE_ENV is undefined in packaged
+// installs (electron-builder doesn't set it), so the old check evaluated
+// truthy in production and the app tried to load http://localhost:5210 from
+// a non-existent Vite server → black window. `app.isPackaged` is `false`
+// during `npm run dev` and `true` once running from the installed exe.
+const isDev = !app.isPackaged;
 const preloadPath = path.join(__dirname, 'preload.js');
 
 function getRendererURL(hash: string): string {
   if (isDev) {
     return `http://localhost:5210/#${hash}`;
   }
+  // Production: renderer is built into <app>/dist/renderer/ via Vite, sibling
+  // to <app>/dist/main/ where this file lives. path.join handles the asar
+  // pseudo-path Electron uses inside the packaged archive.
   return `file://${path.join(__dirname, '../renderer/index.html')}#${hash}`;
 }
 

@@ -36,14 +36,36 @@ CBZ Player v5 collapses all of that into one window. Sort hotkeys move files to 
 
 ## Install
 
-1. Install **Node.js** from [nodejs.org](https://nodejs.org). The LTS version is fine. ⚠ When the installer asks, make sure "Add to PATH" is checked — otherwise the launcher won't find `npm`.
-2. Download or clone this project to a folder on your machine.
-3. Double-click **`install.bat`** in the project folder. This runs `npm install` and pulls in Electron, React, and the archive extractors. First run takes a few minutes.
-4. Done. Launch the app with **`[000-Run CBZ Player Main.bat`**.
+Two ways: install the packaged app (recommended), or run from source.
 
-> The legacy v4.1 PowerShell launcher, AutoHotKey global-hotkey daemon, and original v4.1 README live in the `Old CBZ Sorter/` subfolder for reference. They're not part of the v5 app — you only need the launcher above.
+### Option 1: Install the packaged app
 
-**Optional — copy-anywhere folder launcher:** `[000-Run CBZ Player Here].bat` can be copied into any folder containing CBZ files. Double-clicking it launches the app and auto-loads every CBZ in that folder, with the same folder set as the sort destination. Edit the `APP_DIR=` line at the top of the file to match where you installed the app.
+1. Download or clone this project.
+2. Build the installer once — see "Building the installer from source" below.
+3. Double-click the resulting `release\CBZ Player Setup 0.9.0.exe`. Per-user wizard install, no UAC prompt.
+4. After install, you can:
+   - Double-click any `.cbz` in Explorer → opens in CBZ Player.
+   - Right-click `.cbz` → **Open in CBZ Player** / **Compare 2 in CBZ Player** / **Add to CBZ Player Playlist** / **Repack this CBZ**.
+   - Right-click `.zip` / `.rar` / `.7z` → **Repack with CBZ Player** (additive — doesn't replace existing handlers).
+   - Right-click any folder → **Open in CBZ Player** (loads all archives in that folder as a playlist).
+   - To make CBZ Player the system default for `.cbz`: Windows Settings → Default Apps → search `.cbz` → CBZ Player.
+
+### Option 2: Run from source (dev mode)
+
+1. Install **Node.js** from [nodejs.org](https://nodejs.org). The LTS version is fine. ⚠ When the installer asks, make sure "Add to PATH" is checked.
+2. Download or clone this project.
+3. Double-click **`install dependencies.bat`**. Runs `npm install`. First run takes a few minutes.
+4. Launch via **`[000-Run CBZ Player Main].bat`** (starts Vite + tsc-watch + Electron in parallel).
+
+### Building the installer from source
+
+1. **One-time:** Enable Windows Developer Mode. Settings → Privacy & security → For developers → Developer Mode = On. This grants the symlink-creation privilege that electron-builder's bundled winCodeSign archive needs to extract — without it, the build fails on a confusing 7za error.
+2. Double-click **`[001-Build Installer.bat`** (or run `npm run pack` from a terminal). First build takes 5-15 min (downloads ~150 MB of Electron binaries to a cache). Subsequent builds: 30-60 seconds.
+3. Output: `release\CBZ Player Setup 0.9.0.exe`.
+
+> The legacy v4.1 PowerShell launcher, AutoHotKey global-hotkey daemon, and original v4.1 README live in the `Old CBZ Sorter/` subfolder for reference. They're not part of the v5 app.
+
+**Optional — copy-anywhere folder launcher:** `[000-Run CBZ Player Here].bat` can be copied into any folder containing CBZ files. Double-clicking it launches the app and auto-loads every CBZ in that folder. Less needed since Phase 11 — the right-click "Open this folder in CBZ Player" verb on folder backgrounds does the same thing.
 
 ---
 

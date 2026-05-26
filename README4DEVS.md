@@ -11,7 +11,7 @@
 | Runtime | Electron 41 (Chromium + Node.js) |
 | Renderer | React 19, Tailwind CSS 4, TypeScript 6 |
 | Main process | Node.js + TypeScript 6 |
-| Build | Vite 8 (renderer), `tsc` (main process), electron-builder (packaging — Phase 11, untested) |
+| Build | Vite 8 (renderer), `tsc` (main process), electron-builder (NSIS packaging — shipped Phase 11) |
 | Archive extraction | `7zip-bin` (bundled `7za.exe`, ZIP/7z), `node-unrar-js` (RAR via WASM), `yauzl` (in-memory ZIP) |
 | Image serving | Custom Electron `cbz-image://` protocol |
 | Config | Plain JSON via `app.getPath('userData')/cbz-player-config.json` (auto-migrates from the old `cbz-sorter-config.json` filename on first launch after rename) |
@@ -70,23 +70,27 @@ The Obsidian vault at `H:\[02-AHW Data]\[Obsidian]\Claude Code Vault\CBZ Player\
 
 ```bash
 npm install                              # one-time
-npm run dev                              # Vite + Electron concurrently (preferred for dev)
+npm run dev                              # Vite + tsc-watch + Electron in parallel under concurrently
 
-npm run dev:renderer                     # Vite only (port 5173)
-npm run dev:main                         # tsc + electron only (needs renderer running)
+npm run dev:renderer                     # Vite only (port 5210 — see vite.config.ts)
+npm run dev:main                         # one-shot tsc + electron (needs renderer running)
+npm run dev:main:build                   # tsc --watch only (used by `npm run dev`)
 
-npm run build                            # full build (renderer + main process)
-npm run start                            # electron from built dist
-npm run pack                             # electron-builder --win portable (Phase 11, untested)
+npm run build                            # full build (renderer + main process), no Electron launch
+npm run start                            # electron from built dist (production-like)
+npm run pack                             # electron-builder --win nsis → release\CBZ Player Setup 0.9.0.exe
+                                         # REQUIRES Windows Developer Mode = On (Settings → Privacy & security
+                                         # → For developers) to extract bundled winCodeSign symlinks
 
 # Typecheck only (no compile output)
 npx tsc -p tsconfig.node.json --noEmit
 npx tsc -p tsconfig.json --noEmit --ignoreDeprecations 6.0
+# Both should exit 0 since session 10. Any errors = regression.
 ```
 
 **Auto-load a folder on launch:** set the `CBZ_PLAYER_FOLDER` environment variable before starting (the legacy name `CBZ_SORTER_FOLDER` is also read for backward compatibility). The main process scans that folder and pushes the file list to the renderer once both windows finish loading. `[000-Run CBZ Player Here].bat` uses this pattern.
 
-**Renderer typecheck has 4 known errors** in `App.tsx` (lines ~587, 1267) and `main.tsx:4` — all pre-date recent feature work and are not regressions from any current development. Don't try to "fix" them as drive-by changes.
+**Explorer launch (Phase 11):** the installed app uses `app.requestSingleInstanceLock()` + `second-instance` event handling to batch per-file invocations Windows fires on multi-select. `parseExplorerArgv` extracts `.cbz`/`.zip`/`.rar`/`.7z` paths plus CLI flags (`--compare`, `--append`, `--folder`, `--repack`); `flushExplorerArgs` waits 400 ms (+ 2.5 s stragger window) and `did-finish-load` before dispatching the resolved action via `explorer:open` / `explorer:compare` / `explorer:repack` IPC to the renderer. See vault `Architecture.md` "Explorer Launch Architecture" for the full flow.
 
 ---
 
@@ -172,8 +176,8 @@ Each extraction gets a unique `extractionId` and lives in a named slot. `cbz-ima
 
 ## Known issues & technical debt
 
-- **Phase 11 packaging not tested.** `npm run pack` runs `electron-builder --win portable`, but no portable `.exe` has been produced and tested yet. File association for `.cbz`, command-line argument support, and the auto-load env-var path under packaged mode all need verification.
-- **Renderer typecheck has 4 pre-existing errors** in `App.tsx` (`progress.slot` access at ~line 587, `Set<unknown>` assignment at ~line 1267) and `main.tsx:4` (CSS side-effect import without type declaration). All pre-date current feature work. Functional, just type-noise.
+- **Phase 11 packaging shipped** (session 10). `npm run pack` produces `release\CBZ Player Setup 0.9.0.exe`. File association, single-instance dispatch, right-click verbs, multi-format file filter all working and tested on the user's machine. Remaining polish: real icon (placeholder is functional but generic), code signing (SmartScreen flags unsigned installers), and an optional shell-extension DLL for true conditional Compare verb visibility.
+- **Typechecks fully clean** (both `tsc -p tsconfig.node.json --noEmit` and `tsc -p tsconfig.json --noEmit --ignoreDeprecations 6.0` exit 0). Was a long-standing 4-error situation pre-session-10; fixed during cleanup. Any errors now = regressions.
 - **`ensureSortFolders()` is dead code** (see Architecture Notes).
 - **`repackThumbnailSize` config key is legacy** — thumbnail size is now derived from column count, not stored.
 - **Memory pressure on very large CBZs.** In-memory extraction means ~400MB CBZ = 400MB heap during viewing; compare mode = up to 800MB. Worker thread or streaming-decode would address this; not blocking on modern hardware.

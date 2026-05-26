@@ -14,7 +14,9 @@ export type HotkeyAction =
   | 'rename' | 'escape'
   // Mode switches + playlist operations (session 9)
   | 'enter-compare' | 'enter-repack'
-  | 'toggle-shuffle' | 'randomize-playlist';
+  | 'toggle-shuffle' | 'randomize-playlist'
+  // Reverse the most recent move-style sort
+  | 'undo';
 
 interface UseHotkeysOptions {
   onAction: (action: HotkeyAction) => void;
@@ -61,6 +63,7 @@ export function useHotkeys({ onAction, includePageNav = false, disabled = false 
         case 'q': e.preventDefault(); onAction('quit'); return;
         case 'r': e.preventDefault(); onAction('refresh'); return;
         case 'e': e.preventDefault(); onAction('toggle-center'); return;
+        case 'z': e.preventDefault(); onAction('undo'); return;
         case '1': e.preventDefault(); onAction('view-single'); return;
         case '2': e.preventDefault(); onAction('view-dual-ltr'); return;
         case '3': e.preventDefault(); onAction('view-dual-rtl'); return;

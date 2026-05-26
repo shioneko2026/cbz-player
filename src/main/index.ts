@@ -5,7 +5,7 @@ import fs from 'fs';
 import { execFile } from 'child_process';
 import sevenBin from '7zip-bin';
 import { createViewerWindow, createPlaylistWindow, getViewerWindow, getPlaylistWindow, getWindowBounds, sendToAll, setImmerseEnabled, destroyAllBlackouts } from './window-manager';
-import { scanForCbzFiles, getFileInfoFromPaths, detectSortDestination, ensureSortFolders, sortFile, renameFile, resolveCategoryBasePath, DEFAULT_CATEGORIES } from './file-operations';
+import { scanForCbzFiles, getFileInfoFromPaths, detectSortDestination, ensureSortFolders, sortFile, unsortFile, moveToHolding, cleanupHoldingSubfolder, listStrandedHoldingFiles, renameFile, resolveCategoryBasePath, DEFAULT_CATEGORIES } from './file-operations';
 import { loadConfig, saveConfig } from './config-store';
 import { extractCbz, cleanupTemp, cleanupSlot, resolveImage, getSlotSources, getSlotNames, hasSlot, type ImageSource } from './cbz-extractor';
 import { saveSessionLog } from './session-logger';
@@ -55,8 +55,26 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'cbz-image', privileges: { standard: true, secure: true, supportFetchAPI: true } },
 ]);
 
+// Undo-trash holding folder. Purges go here first (instead of straight to
+// the Recycle Bin) so they can be undone via Ctrl+Z. On the next purge, on
+// app quit, or on next startup (sweep), held files graduate to the actual
+// Windows Recycle Bin via shell.trashItem.
+const holdingFolder = path.join(app.getPath('userData'), 'cbz-player-undo-trash');
+
 app.whenReady().then(() => {
   const config = loadConfig();
+
+  // Ensure the holding folder exists, and sweep anything stranded by a
+  // previous crashed/force-closed session into the real Recycle Bin.
+  try {
+    if (!fs.existsSync(holdingFolder)) fs.mkdirSync(holdingFolder, { recursive: true });
+    const stranded = listStrandedHoldingFiles(holdingFolder);
+    for (const p of stranded) {
+      shell.trashItem(p).then(() => cleanupHoldingSubfolder(p)).catch(() => {
+        // Best-effort sweep — if it fails we leave it; next startup tries again.
+      });
+    }
+  } catch {}
 
   // Register protocol handler for extracted images
   // URL format: cbz-image://host/{extractionId}/{filename}
@@ -347,10 +365,15 @@ app.whenReady().then(() => {
 
     if (category.isPurge) {
       try {
-        await retryOperation(() => trashWithFallback(filePath));
-        return { success: true, isDupe: false, action: 'purge' };
+        // Purge into the holding folder instead of straight to Recycle Bin so
+        // it can be undone (Ctrl+Z) within the session. The renderer's undo
+        // bookkeeping will call `file:graduate-purge` to push the previously
+        // held file into the real Recycle Bin when a new sort overwrites the
+        // undo snapshot, and on app quit.
+        const heldPath = await retryOperation(async () => moveToHolding(filePath, holdingFolder));
+        return { success: true, isDupe: false, destPath: heldPath, action: 'purge' };
       } catch (err: any) {
-        return { success: false, error: err.message ?? 'Failed to delete' };
+        return { success: false, error: err.message ?? 'Failed to purge' };
       }
     }
 
@@ -360,6 +383,39 @@ app.whenReady().then(() => {
       return { success: true, isDupe: result.isDupe, destPath: result.destPath, action: 'move' };
     } catch (err: any) {
       return { success: false, error: err.message ?? 'Failed to move' };
+    }
+  });
+
+  // Reverse a previous sort. Works for both move-style sorts (file lives in
+  // its category folder) and purge (file lives in our holding folder). For
+  // the purge case we also remove the now-empty UUID subfolder inside the
+  // holding folder once the file has been moved back out.
+  ipcMain.handle('file:unsort', async (_event, currentPath: string, originalPath: string) => {
+    try {
+      const file = await retryOperation(async () => unsortFile(currentPath, originalPath));
+      // If the file lived in our holding folder, its UUID subfolder is now
+      // empty — tidy up so the holding folder doesn't accumulate empties.
+      const parentDir = path.dirname(currentPath);
+      if (path.dirname(parentDir) === holdingFolder) {
+        cleanupHoldingSubfolder(currentPath);
+      }
+      return { success: true, file };
+    } catch (err: any) {
+      return { success: false, error: err.message ?? 'Failed to undo sort' };
+    }
+  });
+
+  // Push a held purge file from the holding folder into the actual Windows
+  // Recycle Bin. Called by the renderer when a new sort/purge overwrites the
+  // undo snapshot (so the user can still recover the file via Windows even
+  // though it's no longer undoable in-app), and also from app:quit below.
+  ipcMain.handle('file:graduate-purge', async (_event, heldPath: string) => {
+    try {
+      await retryOperation(() => trashWithFallback(heldPath));
+      cleanupHoldingSubfolder(heldPath);
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message ?? 'Failed to graduate held file' };
     }
   });
 
@@ -598,11 +654,25 @@ app.whenReady().then(() => {
   });
 
   // ─── App Quit ──────────────────────────────────────────────────────────────
-  ipcMain.on('app:quit', (_event, uiState?: any) => {
+  ipcMain.on('app:quit', async (_event, uiState?: any) => {
     saveWindowState(uiState);
     // Save session log if stats were provided
     if (uiState?.sessionLog) {
       saveSessionLog(uiState.sessionLog);
+    }
+    // Graduate any held purge file into the real Recycle Bin before quitting
+    // so the user can still recover it from Windows after the app exits. We
+    // await this — if we fire-and-forget, app.quit() can kill the process
+    // before shell.trashItem completes and the file gets stranded for the
+    // next startup sweep to handle. A few hundred ms of extra quit time is
+    // worth the consistent state.
+    if (uiState?.pendingPurgeHeldPath) {
+      try {
+        await trashWithFallback(uiState.pendingPurgeHeldPath);
+        cleanupHoldingSubfolder(uiState.pendingPurgeHeldPath);
+      } catch {
+        // If graduation fails, the startup sweep on next launch will retry.
+      }
     }
     destroyAllBlackouts();
     cleanupTemp();

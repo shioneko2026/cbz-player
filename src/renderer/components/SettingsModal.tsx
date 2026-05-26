@@ -83,7 +83,7 @@ interface SettingsModalProps {
   onLiveBgChange?: (darkBrightness: number, lightBrightness: number) => void;
 }
 
-type Tab = 'categories' | 'folders' | 'viewer' | 'repack' | 'ui' | 'shortcuts';
+type Tab = 'categories' | 'folders' | 'viewer' | 'repack' | 'ui' | 'logging' | 'shortcuts';
 
 export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLiveBgChange }: SettingsModalProps) {
   const [tab, setTab] = useState<Tab>('categories');
@@ -104,6 +104,7 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
   const [repackColumns, setRepackColumns] = useState(3);
   const [repackThumbnailSize, setRepackThumbnailSize] = useState(150);
   const [repackPanelWidth, setRepackPanelWidth] = useState(40);
+  const [minLogSessionMinutes, setMinLogSessionMinutes] = useState(5);
   const [loading, setLoading] = useState(true);
   // Async fs validation results for each category's outputPath, keyed by category id.
   // Updated on load, on blur of the override input, and when Browse picks a folder.
@@ -155,6 +156,7 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
       setRepackColumns(config.repackColumns ?? 3);
       setRepackThumbnailSize(config.repackThumbnailSize ?? 150);
       setRepackPanelWidth(config.repackPanelWidth ?? 40);
+      setMinLogSessionMinutes(config.minLogSessionMinutes ?? 5);
       setLoading(false);
     });
   }, [isOpen]);
@@ -173,6 +175,7 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
   const resetViewer = () => { setViewerMode('single'); setControlsHideDelay(1500); setControlBarMode('auto-hide'); setBeepOnLastPage(true); setBeepVolume(0.15); setBeepPitch(600); };
   const resetRepack = () => { setRepackColumns(3); setRepackThumbnailSize(150); setRepackPanelWidth(40); };
   const resetUI = () => { setDefaultDocked(false); setDefaultPanelWidth(320); setStartFullscreen(false); setDarkBgBrightness(26); setLightBgBrightness(232); };
+  const resetLogging = () => { setMinLogSessionMinutes(5); };
 
   // Per-category sync errors (illegal chars, relative path) — pure derivation, recomputes on every render.
   const syncErrorsByCat = useMemo(() => {
@@ -222,10 +225,11 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
       repackColumns,
       repackThumbnailSize,
       repackPanelWidth,
+      minLogSessionMinutes,
     });
     onSaved?.();
     onClose();
-  }, [categories, hasBlockingErrors, viewerMode, controlsHideDelay, controlBarMode, defaultDocked, defaultPanelWidth, startFullscreen, darkBgBrightness, lightBgBrightness, useSourceFolder, customOutputFolder, beepOnLastPage, beepVolume, beepPitch, repackColumns, repackThumbnailSize, repackPanelWidth, onClose, onSaved]);
+  }, [categories, hasBlockingErrors, viewerMode, controlsHideDelay, controlBarMode, defaultDocked, defaultPanelWidth, startFullscreen, darkBgBrightness, lightBgBrightness, useSourceFolder, customOutputFolder, beepOnLastPage, beepVolume, beepPitch, repackColumns, repackThumbnailSize, repackPanelWidth, minLogSessionMinutes, onClose, onSaved]);
 
   const updateCategory = (index: number, field: string, value: string) => {
     setCategories(prev => prev.map((c, i) => i === index ? { ...c, [field]: value } : c));
@@ -290,7 +294,7 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
 
         {/* Tabs */}
         <div className={`px-6 py-2 border-b ${border} flex gap-1`}>
-          {([['categories', 'Sort Categories'], ['folders', 'Folders'], ['viewer', 'Viewer'], ['repack', 'Repack'], ['ui', 'UI Behavior'], ['shortcuts', 'Shortcuts']] as const).map(([t, label]) => (
+          {([['categories', 'Sort Categories'], ['folders', 'Folders'], ['viewer', 'Viewer'], ['repack', 'Repack'], ['ui', 'UI Behavior'], ['logging', 'Logging'], ['shortcuts', 'Shortcuts']] as const).map(([t, label]) => (
             <button key={t} onClick={() => setTab(t)} className={`px-3 py-1.5 rounded text-sm ${tab === t ? tabActive : tabInactive}`}>
               {label}
             </button>
@@ -545,6 +549,26 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
                 Reset repack settings to defaults
               </button>
             </div>
+          ) : tab === 'logging' ? (
+            <div className="space-y-4">
+              <div>
+                <label className={`text-sm ${subtext} block mb-1`}>Minimum session length to write log (minutes)</label>
+                <p className={`text-xs ${subtext} mb-2`}>
+                  Sessions shorter than this won't be written to the session log on Ctrl+Q. Useful for skipping quick checks where you opened the app, looked at something, then exited. Set to 0 to log every session.
+                </p>
+                <input type="number" value={minLogSessionMinutes} onChange={e => setMinLogSessionMinutes(Math.max(0, Number(e.target.value)))}
+                  min={0} max={120} step={1}
+                  className={`w-full text-sm px-2 py-1.5 rounded border ${inputBg}`} />
+              </div>
+              <div className={`p-3 rounded border ${border}`}>
+                <p className={`text-xs ${subtext}`}>
+                  The <strong className={text}>Write Logs</strong> toggle (in the playlist panel header) controls whether logging is on at all. The minimum length here only matters when that toggle is enabled and a sort destination is set.
+                </p>
+              </div>
+              <button onClick={resetLogging} className="mt-2 text-xs text-red-400 hover:text-red-300">
+                Reset logging settings to defaults
+              </button>
+            </div>
           ) : tab === 'shortcuts' ? (
             <div className="space-y-4 text-sm">
               <p className={`${subtext}`}>
@@ -555,6 +579,7 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
                   ...categories
                     .filter(c => c.hotkey)
                     .map(c => [c.hotkey.toUpperCase(), c.label] as [string, string]),
+                  ['Ctrl+Z', 'Undo last sort (including purge)'],
                 ]],
                 ['File navigation', [
                   ['N', 'Next file'],

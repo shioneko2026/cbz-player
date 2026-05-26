@@ -216,6 +216,119 @@ export function sortFile(
 }
 
 /**
+ * Move a file into the undo-trash holding folder used to make purge undoable.
+ * Each held file gets its own UUID-ish subfolder so the file keeps its
+ * original basename — that's what shell.trashItem will record in the real
+ * Windows Recycle Bin when this file is eventually "graduated."
+ *
+ * Returns the new path inside the holding folder.
+ */
+export function moveToHolding(filePath: string, holdingFolder: string): string {
+  if (!fs.existsSync(nsp(filePath))) {
+    throw new Error(`Source file not found: ${path.basename(filePath)}`);
+  }
+  if (!fs.existsSync(nsp(holdingFolder))) {
+    fs.mkdirSync(nsp(holdingFolder), { recursive: true });
+  }
+  const stamp = Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+  const subdir = path.join(holdingFolder, stamp);
+  fs.mkdirSync(nsp(subdir), { recursive: true });
+  const destPath = path.join(subdir, path.basename(filePath));
+  try {
+    fs.renameSync(nsp(filePath), nsp(destPath));
+  } catch (err: any) {
+    if (err?.code === 'EXDEV') {
+      fs.copyFileSync(nsp(filePath), nsp(destPath));
+      fs.unlinkSync(nsp(filePath));
+    } else {
+      throw err;
+    }
+  }
+  return destPath;
+}
+
+/**
+ * Remove the empty subfolder that contained a held file (after the file has
+ * been moved out — either restored via unsortFile or graduated to the real
+ * Recycle Bin). Idempotent; tolerates the folder already being gone.
+ */
+export function cleanupHoldingSubfolder(heldPath: string): void {
+  const subdir = path.dirname(heldPath);
+  try {
+    fs.rmdirSync(nsp(subdir));
+  } catch {
+    // Already gone, or somehow not empty — both fine to ignore here.
+  }
+}
+
+/**
+ * List all files currently in the holding folder. Called once at startup so
+ * the caller can graduate any stranded files from a crashed previous session
+ * to the real Recycle Bin. Returns absolute paths.
+ */
+export function listStrandedHoldingFiles(holdingFolder: string): string[] {
+  if (!fs.existsSync(nsp(holdingFolder))) return [];
+  const out: string[] = [];
+  try {
+    const entries = fs.readdirSync(nsp(holdingFolder), { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const subdir = path.join(holdingFolder, entry.name);
+      try {
+        const subEntries = fs.readdirSync(nsp(subdir), { withFileTypes: true });
+        for (const sub of subEntries) {
+          if (sub.isFile()) out.push(path.join(subdir, sub.name));
+        }
+      } catch {}
+    }
+  } catch {}
+  return out;
+}
+
+/**
+ * Reverse a previous sort: move `currentPath` back to `originalPath`. Used by
+ * the renderer-side single-level undo. Fails loud (throws) instead of silently
+ * overwriting if there's already a different file sitting at `originalPath`,
+ * because that would mean an external rename/move/drop happened between the
+ * sort and the undo and we don't know which file the user actually wants.
+ *
+ * If the original parent folder no longer exists (e.g. user emptied the
+ * source folder by sorting everything out of it), it's recreated lazily —
+ * same as the forward sortFile does for category folders.
+ */
+export function unsortFile(currentPath: string, originalPath: string): FileInfo {
+  if (!fs.existsSync(nsp(currentPath))) {
+    throw new Error(`Sorted file is no longer at ${currentPath} — was it moved or renamed externally?`);
+  }
+  if (fs.existsSync(nsp(originalPath))) {
+    throw new Error(`A file already exists at the original path: ${path.basename(originalPath)}. Move or rename it before undoing.`);
+  }
+  const originalDir = path.dirname(originalPath);
+  if (!fs.existsSync(nsp(originalDir))) {
+    fs.mkdirSync(nsp(originalDir), { recursive: true });
+  }
+
+  try {
+    fs.renameSync(nsp(currentPath), nsp(originalPath));
+  } catch (err: any) {
+    if (err?.code === 'EXDEV') {
+      fs.copyFileSync(nsp(currentPath), nsp(originalPath));
+      fs.unlinkSync(nsp(currentPath));
+    } else {
+      throw err;
+    }
+  }
+
+  const stat = fs.statSync(nsp(originalPath));
+  return {
+    name: path.basename(originalPath),
+    fullPath: originalPath,
+    sizeBytes: stat.size,
+    createdDate: stat.birthtime.toISOString().split('T')[0],
+  };
+}
+
+/**
  * Rename a file on disk. Returns the new FileInfo or throws on error.
  */
 export function renameFile(oldPath: string, newName: string): FileInfo {

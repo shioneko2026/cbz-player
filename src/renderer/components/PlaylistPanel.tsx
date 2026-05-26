@@ -145,6 +145,11 @@ export interface PlaylistPanelProps {
   renamingIndex?: number | null;
   onSetRenamingIndex?: (index: number | null) => void;
   onSort?: (categoryId: string) => void;
+  onUndo?: () => void;
+  // True when there's a snapshotted last sort that can be reversed. Drives
+  // the Undo button's enabled state. The actual snapshot data lives in the
+  // viewer's usePlaylistState (or, for the detached panel, gets broadcast).
+  canUndo?: boolean;
   initialLogHeight?: number;
 }
 
@@ -386,7 +391,7 @@ export default function PlaylistPanel(props: PlaylistPanelProps) {
       </div>
 
       {/* Tools */}
-      <div className={`px-4 py-2 border-b ${t.border} grid grid-cols-2 gap-2`}>
+      <div className={`px-4 py-2 border-b ${t.border} grid grid-cols-3 gap-2`}>
         <button
           onClick={onCycleComparePick}
           className={`text-sm font-medium py-1.5 px-2 rounded transition-colors whitespace-nowrap min-w-0 ${
@@ -406,6 +411,18 @@ export default function PlaylistPanel(props: PlaylistPanelProps) {
           }`}
         >
           📦 Repack
+        </button>
+        <button
+          onClick={props.onUndo}
+          disabled={!props.canUndo}
+          title={props.canUndo ? 'Undo last sort (Ctrl+Z)' : 'Nothing to undo'}
+          className={`text-sm font-medium py-1.5 px-2 rounded transition-colors whitespace-nowrap min-w-0 ${
+            props.canUndo
+              ? (paneDark ? 'bg-zinc-700 hover:bg-zinc-600 text-zinc-200' : 'bg-zinc-300 hover:bg-zinc-400 text-zinc-800')
+              : (paneDark ? 'bg-zinc-800 text-zinc-600 cursor-not-allowed' : 'bg-zinc-100 text-zinc-400 cursor-not-allowed')
+          }`}
+        >
+          ↩️ Undo
         </button>
       </div>
 

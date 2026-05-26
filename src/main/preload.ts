@@ -30,6 +30,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // File operations
   sortFile: (filePath: string, categoryId: string, sortDest: string) => ipcRenderer.invoke('file:sort', filePath, categoryId, sortDest),
+  unsortFile: (currentPath: string, originalPath: string) => ipcRenderer.invoke('file:unsort', currentPath, originalPath),
+  graduatePurge: (heldPath: string) => ipcRenderer.invoke('file:graduate-purge', heldPath),
   renameFile: (oldPath: string, newName: string) => ipcRenderer.invoke('file:rename', oldPath, newName),
   trashFiles: (paths: string[]) => ipcRenderer.invoke('file:trash', paths),
 
@@ -38,7 +40,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   cleanupCbz: (slot?: string) => ipcRenderer.invoke('cbz:cleanup', slot),
   repackCbz: (originalPath: string, slot: string, keepIndices: number[], renames: Record<string, string>, folderName?: string, newFileName?: string) =>
     ipcRenderer.invoke('cbz:repack', originalPath, slot, keepIndices, renames, folderName, newFileName),
-  onExtractionProgress: (callback: (progress: { percent: number; status: string }) => void) => {
+  onExtractionProgress: (callback: (progress: { percent: number; status: string; slot?: string }) => void) => {
     ipcRenderer.on('cbz:extract-progress', (_event, progress) => callback(progress));
   },
 

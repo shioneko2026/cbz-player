@@ -23,12 +23,14 @@ declare global {
       loadPaths: (filePaths: string[]) => Promise<{ files: FileInfo[]; sortDestination: string | null }>;
       pickFolder: () => Promise<string | null>;
       getPathForFile: (file: File) => string;
-      sortFile: (filePath: string, categoryId: string, sortDest: string) => Promise<{ success: boolean; isDupe?: boolean; error?: string; action?: string }>;
+      sortFile: (filePath: string, categoryId: string, sortDest: string) => Promise<{ success: boolean; isDupe?: boolean; destPath?: string; error?: string; action?: string }>;
+      unsortFile: (currentPath: string, originalPath: string) => Promise<{ success: boolean; file?: FileInfo; error?: string }>;
+      graduatePurge: (heldPath: string) => Promise<{ success: boolean; error?: string }>;
       renameFile: (oldPath: string, newName: string) => Promise<{ success: boolean; file: FileInfo | null; error: string | null }>;
       trashFiles: (paths: string[]) => Promise<{ path: string; success: boolean }[]>;
       extractCbz: (cbzPath: string, slot?: string) => Promise<{ images: string[]; imageNames?: string[]; extractionId: string | null; topLevelFolder?: string; error: string | null }>;
       cleanupCbz: (slot?: string) => Promise<void>;
-      onExtractionProgress: (callback: (progress: { percent: number; status: string }) => void) => void;
+      onExtractionProgress: (callback: (progress: { percent: number; status: string; slot?: string }) => void) => void;
       repackCbz: (originalPath: string, slot: string, keepIndices: number[], renames: Record<string, string>, folderName?: string, newFileName?: string) => Promise<{ success: boolean; error?: string; newPath?: string }>;
       loadSettings: () => Promise<any>;
       saveSettings: (settings: any) => Promise<{ success: boolean }>;
@@ -112,6 +114,19 @@ interface SessionStats {
   unreadable: number;
 }
 
+// Snapshot of the most recent move-style sort, so Ctrl+Z (or the Undo button)
+// can reverse it. Single-level — overwritten on each sort, cleared on undo,
+// and cleared on purge (which is intentionally not undoable here).
+interface UndoSnapshot {
+  originalPath: string;
+  destPath: string;
+  originalIndex: number;
+  originalFile: FileInfo;
+  categoryId: string;
+  statKey: keyof SessionStats;
+  label: string;
+}
+
 interface CategoryConfig {
   id: string;
   label: string;
@@ -143,6 +158,7 @@ function usePlaylistState() {
   const [shuffleEnabled, setShuffleEnabled] = useState(false);
   const [skipViewedEnabled, setSkipViewedEnabled] = useState(false);
   const [writeLogsEnabled, setWriteLogsEnabled] = useState(false);
+  const [minLogSessionMinutes, setMinLogSessionMinutes] = useState(5);
   const [globalHotkeys, setGlobalHotkeys] = useState(false);
   const [viewedPaths, setViewedPaths] = useState<Set<string>>(new Set());
   const [paneDark, setPaneDark] = useState(true);
@@ -178,6 +194,7 @@ function usePlaylistState() {
       if (cfg.isDocked !== undefined) setIsDocked(cfg.isDocked);
       if (cfg.categories?.length > 0) setCategories(cfg.categories);
       if (cfg.writeLogsEnabled !== undefined) setWriteLogsEnabled(cfg.writeLogsEnabled);
+      if (cfg.minLogSessionMinutes !== undefined) setMinLogSessionMinutes(cfg.minLogSessionMinutes);
       setConfigLoaded(true);
     });
   }, []);
@@ -230,6 +247,9 @@ function usePlaylistState() {
 
   // Sort action: move/purge current file, remove from playlist, advance to next
   const [isProcessing, setIsProcessing] = useState(false);
+  // Single-level undo snapshot — populated after each successful move-style sort,
+  // cleared after undo, cleared on purge (purges aren't undoable here).
+  const [lastUndo, setLastUndo] = useState<UndoSnapshot | null>(null);
 
   const handleSort = useCallback(async (categoryId: string) => {
     if (!window.electronAPI || isProcessing) return;
@@ -265,6 +285,33 @@ function usePlaylistState() {
         incrementStat(info.stat);
       }
 
+      // Single-level undo: setting a new snapshot loses the previous one.
+      // If the previous one was a purge (file lives in the holding folder),
+      // graduate it to the real Windows Recycle Bin first so the user can
+      // still recover it via Windows even though it's no longer undoable
+      // in-app. Fire-and-forget — graduation failure isn't worth blocking
+      // the new sort; the next startup sweep will catch any stragglers.
+      if (lastUndo && lastUndo.categoryId === 'purge') {
+        window.electronAPI?.graduatePurge?.(lastUndo.destPath).catch(() => {});
+      }
+
+      // Capture undo snapshot for both move-style sorts AND purge. For purge
+      // the destPath is inside our holding folder (see file:sort backend);
+      // unsortFile handles either case transparently.
+      if ((result.action === 'move' || result.action === 'purge') && result.destPath && info) {
+        setLastUndo({
+          originalPath: file.fullPath,
+          destPath: result.destPath,
+          originalIndex: currentIndexRef.current,
+          originalFile: file,
+          categoryId,
+          statKey: info.stat,
+          label: info.label,
+        });
+      } else {
+        setLastUndo(null);
+      }
+
       // Remove from playlist and advance
       const idx = currentIndexRef.current;
       setFiles(prev => {
@@ -284,7 +331,47 @@ function usePlaylistState() {
     } finally {
       setIsProcessing(false);
     }
-  }, [files, sortDestination, isProcessing]);
+  }, [files, sortDestination, isProcessing, lastUndo]);
+
+  // Reverse the most recent move-style sort. Moves the file from its sort
+  // destination back to its original folder, re-inserts it into the playlist
+  // at its original index, and jumps the cursor to it so the user can
+  // immediately act (rename, compare, etc.) — which is the whole point of
+  // wanting it back. Fails loud on filesystem conflicts (something already at
+  // the original path, file no longer at the destination) per the global
+  // fail-loud principle: silent recovery here could lose user data.
+  const handleUndo = useCallback(async () => {
+    if (!window.electronAPI || !lastUndo || isProcessing) return;
+    setIsProcessing(true);
+    try {
+      const result = await window.electronAPI.unsortFile(lastUndo.destPath, lastUndo.originalPath);
+      if (!result.success || !result.file) {
+        addLog(`Undo failed: ${lastUndo.originalFile.name} — ${result.error ?? 'unknown error'}`, 'text-red-400', '❌');
+        alert(`Undo failed: ${result.error ?? 'unknown error'}`);
+        return;
+      }
+
+      // Re-insert at original index, clamped to current list bounds (the
+      // playlist may have shrunk via other actions since the sort).
+      const restored = result.file;
+      const snapshot = lastUndo;
+      setFiles(prev => {
+        const insertAt = Math.min(snapshot.originalIndex, prev.length);
+        const updated = [...prev.slice(0, insertAt), restored, ...prev.slice(insertAt)];
+        setCurrentIndex(insertAt);
+        currentIndexRef.current = insertAt;
+        window.electronAPI?.broadcastState({ files: updated, currentIndex: insertAt });
+        return updated;
+      });
+
+      // Reverse the stat increment so totals stay honest.
+      setStats(prev => ({ ...prev, [snapshot.statKey]: Math.max(0, prev[snapshot.statKey] - 1) }));
+      addLog(`↩️ Undone ${snapshot.label}: ${restored.name}`, 'text-zinc-300', '↩️');
+      setLastUndo(null);
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [lastUndo, isProcessing, addLog]);
 
   // After a list mutation, keep currentIndex pointing at the same file (or clamp if it was removed).
   const reconcileCurrentIndex = useCallback((prev: FileInfo[], updated: FileInfo[]): number => {
@@ -464,12 +551,14 @@ function usePlaylistState() {
     immerseEnabled, setImmerseEnabled,
     renamingIndex, setRenamingIndex, startRenaming, handleRename,
     handleSort, isProcessing,
+    lastUndo, handleUndo,
     handleDeleteFiles, handleRemoveFromPlaylist,
     compareMode, compareFileIndex, comparePickMode, comparePickTwoMode, compareLeftIndex,
     startCompareWithFile, cycleComparePick, cancelComparePick, exitCompare, enterComparePickMode,
     randomizePlaylist,
     categories, setCategories,
     writeLogsEnabled, setWriteLogsEnabled,
+    minLogSessionMinutes, setMinLogSessionMinutes,
     stats, logEntries, sessionStartTime, addLog, incrementStat, clearLog,
     navigate, jumpTo, handleViewerTheme, handleToggleDocked,
   };
@@ -791,12 +880,18 @@ function ViewerWindow() {
       stats: ps.stats,
       logEntries: ps.logEntries,
       sessionStartTime: ps.sessionStartTime,
+      canUndo: !!ps.lastUndo,
+      // So a quit from the detached playlist window can graduate any pending
+      // held purge — the detached window doesn't otherwise know what's held.
+      pendingPurgeHeldPath: (ps.lastUndo && ps.lastUndo.categoryId === 'purge')
+        ? ps.lastUndo.destPath
+        : undefined,
     });
   }, [ps.files, ps.currentIndex, ps.sortDestination, ps.viewedPaths, ps.shuffleEnabled,
       ps.skipViewedEnabled, ps.globalHotkeys, ps.paneDark, ps.viewerDark, ps.isDocked, ps.categories,
       ps.stats, ps.logEntries,
       ps.renamingIndex, ps.compareMode, ps.compareFileIndex, ps.comparePickMode,
-      ps.comparePickTwoMode, ps.compareLeftIndex]);
+      ps.comparePickTwoMode, ps.compareLeftIndex, ps.lastUndo]);
 
   // Listen for actions from detached playlist window
   useEffect(() => {
@@ -841,6 +936,7 @@ function ViewerWindow() {
           break;
         }
         case 'sort': ps.handleSort(action.categoryId); break;
+        case 'undo': ps.handleUndo(); break;
         case 'openSettings': setSettingsOpen(true); break;
         case 'repack': if (images.length > 0 && !repackMode && !ps.compareMode) setRepackMode(true); break;
         case 'enterComparePickMode': ps.enterComparePickMode(); break;
@@ -905,22 +1001,42 @@ function ViewerWindow() {
       case 'keep': case 'purge': case 'fix': case 'translate':
       case 'inquire': case 'unreadable':
         ps.handleSort(action); break;
-      case 'quit':
+      case 'undo':
+        // Allowed in any mode — mirrors sort, which also works in compare/repack.
+        // handleUndo no-ops if there's no snapshot to undo, so this is safe.
+        ps.handleUndo(); break;
+      case 'quit': {
+        // Gate session log: must have a destination, logs enabled, AND session
+        // longer than minLogSessionMinutes. Sessions shorter than the threshold
+        // (e.g. quick checks) deliberately leave no log entry.
+        const elapsedMs = Date.now() - ps.sessionStartTime;
+        const minMs = Math.max(0, ps.minLogSessionMinutes) * 60_000;
+        const meetsMinDuration = elapsedMs >= minMs;
+        // If a purge is currently sitting in the holding folder (most recent
+        // action was a purge that hasn't been undone or overwritten), tell
+        // main to graduate it to the real Recycle Bin before quitting. Main
+        // awaits the graduation so the file lands cleanly instead of getting
+        // stranded for the next startup sweep.
+        const pendingPurgeHeldPath = (ps.lastUndo && ps.lastUndo.categoryId === 'purge')
+          ? ps.lastUndo.destPath
+          : undefined;
         window.electronAPI?.quitApp({
           paneDark: ps.paneDark, viewerDark: ps.viewerDark,
           isDocked: ps.isDocked, dockedPanelWidth: panelWidth,
           playlistVisible, centerPage,
           writeLogsEnabled: ps.writeLogsEnabled,
-          sessionLog: (ps.sortDestination && ps.writeLogsEnabled) ? {
+          sessionLog: (ps.sortDestination && ps.writeLogsEnabled && meetsMinDuration) ? {
             sortDestination: ps.sortDestination,
             startTime: ps.sessionStartTime,
             endTime: Date.now(),
             stats: ps.stats,
           } : undefined,
+          pendingPurgeHeldPath,
         });
         break;
+      }
     }
-  }, [navigateFile, ps.handleSort, ps.isDocked, ps.paneDark, ps.viewerDark, ps.compareMode, ps.comparePickMode, ps.comparePickTwoMode, panelWidth, playlistVisible, centerPage, repackMode, images.length, ps.shuffleEnabled, ps.enterComparePickMode, ps.randomizePlaylist]);
+  }, [navigateFile, ps.handleSort, ps.isDocked, ps.paneDark, ps.viewerDark, ps.compareMode, ps.comparePickMode, ps.comparePickTwoMode, panelWidth, playlistVisible, centerPage, repackMode, images.length, ps.shuffleEnabled, ps.enterComparePickMode, ps.randomizePlaylist, ps.minLogSessionMinutes, ps.lastUndo, ps.handleUndo]);
 
   useHotkeys({ onAction: handleAction, includePageNav: true, disabled: settingsOpen });
 
@@ -1147,6 +1263,8 @@ function ViewerWindow() {
               onSetRenamingIndex={ps.setRenamingIndex}
               onRename={ps.handleRename}
               onSort={ps.handleSort}
+              onUndo={ps.handleUndo}
+              canUndo={!!ps.lastUndo}
               onDeleteFiles={ps.handleDeleteFiles}
               onRemoveFromPlaylist={ps.handleRemoveFromPlaylist}
               compareMode={ps.compareMode}
@@ -1180,6 +1298,7 @@ function ViewerWindow() {
             if (cfg.repackColumns) setRepackColumns(cfg.repackColumns);
             if (cfg.repackThumbnailSize) setRepackThumbnailSize(cfg.repackThumbnailSize);
             if (cfg.repackPanelWidth) setRepackPanelWidth(cfg.repackPanelWidth);
+            if (cfg.minLogSessionMinutes !== undefined) ps.setMinLogSessionMinutes(cfg.minLogSessionMinutes);
             (window as any).__cbzSettings = {
               beepOnLastPage: cfg.beepOnLastPage ?? true,
               beepVolume: cfg.beepVolume ?? 0.15,
@@ -1248,13 +1367,19 @@ function PlaylistWindow() {
       case 'enter-repack': send({ type: 'repack' }); break;
       case 'toggle-shuffle': send({ type: 'setShuffle', value: !state.shuffleEnabled }); break;
       case 'randomize-playlist': send({ type: 'randomizePlaylist' }); break;
-      case 'quit': window.electronAPI?.quitApp({ paneDark: state.paneDark, viewerDark: state.viewerDark, isDocked: state.isDocked }); break;
+      case 'undo': send({ type: 'undo' }); break;
+      case 'quit': window.electronAPI?.quitApp({
+        paneDark: state.paneDark,
+        viewerDark: state.viewerDark,
+        isDocked: state.isDocked,
+        pendingPurgeHeldPath: state.pendingPurgeHeldPath,
+      }); break;
     }
   }, [send, state.compareMode, state.comparePickMode, state.comparePickTwoMode, state.paneDark, state.viewerDark, state.isDocked, state.shuffleEnabled]);
 
   useHotkeys({ onAction: handleAction });
 
-  const viewedPathsSet = React.useMemo(() => new Set(state.viewedPaths || []), [state.viewedPaths]);
+  const viewedPathsSet = React.useMemo(() => new Set<string>(state.viewedPaths || []), [state.viewedPaths]);
 
   return (
     <div className="h-full w-full">
@@ -1289,6 +1414,8 @@ function PlaylistWindow() {
         onSetRenamingIndex={(idx) => send({ type: 'setRenamingIndex', value: idx })}
         onRename={(oldPath, newName) => send({ type: 'rename', oldPath, newName })}
         onSort={(categoryId) => send({ type: 'sort', categoryId })}
+        onUndo={() => send({ type: 'undo' })}
+        canUndo={!!state.canUndo}
         onDeleteFiles={(paths) => send({ type: 'deleteFiles', paths })}
         onRemoveFromPlaylist={(paths) => send({ type: 'removeFromPlaylist', paths })}
         compareMode={state.compareMode}

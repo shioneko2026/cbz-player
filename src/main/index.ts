@@ -96,18 +96,34 @@ let lastFlushTime = 0;
  *  paths and our custom flag tokens. Each returned PendingArg carries the
  *  flag state seen in the SAME argv batch — different verbs invoke with
  *  different flag sets, and the dispatch logic uses these to decide what
- *  kind of action to take. */
+ *  kind of action to take.
+ *
+ *  We explicitly skip the executable's own path (always at argv[0] in both
+ *  packaged and dev modes) and the dev-mode `.` token — without that filter
+ *  the --folder path would erroneously include the .exe (triggering
+ *  scanForCbzFiles to ENOTDIR on the binary). */
 function parseExplorerArgv(argv: string[]): PendingArg[] {
   const isCompare = argv.includes('--compare');
   const isAppend = argv.includes('--append');
   const isFolder = argv.includes('--folder');
+  const myExePathLower = process.execPath.toLowerCase();
   const paths: PendingArg[] = [];
   for (const token of argv) {
     if (!token || token.startsWith('--')) continue;
+    // Skip our own executable (always argv[0]; also defensive against
+    // odd shells that pass it twice) and the dev-mode "." sentinel.
+    if (token.toLowerCase() === myExePathLower) continue;
+    if (token === '.') continue;
     if (isFolder) {
-      // Folder verb: %1 is a directory path (not a .cbz). Accept any non-flag
-      // token. We'll scan it for .cbz files at dispatch time.
-      paths.push({ path: token, isCompare, isAppend, isFolder });
+      // Folder verb: %1 is a directory path, not a .cbz. Confirm by stat
+      // before queueing — protects against weird argv structure (e.g. a
+      // file passed instead of a folder; falls through to "no usable path"
+      // rather than crashing on scandir later).
+      try {
+        if (fs.existsSync(token) && fs.statSync(token).isDirectory()) {
+          paths.push({ path: token, isCompare, isAppend, isFolder });
+        }
+      } catch {}
     } else if (token.toLowerCase().endsWith('.cbz')) {
       paths.push({ path: token, isCompare, isAppend, isFolder });
     }

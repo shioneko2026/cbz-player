@@ -5,8 +5,10 @@
   "main": "dist/main/index.js",
   "scripts": {
     "dev:renderer": "vite",
-    "dev:main": "tsc -p tsconfig.node.json && electron .",
-    "dev": "concurrently -n renderer,main \"npm run dev:renderer\" \"wait-on http://localhost:5210 && npm run dev:main\"",
+    "dev:main": "tsc -p tsconfig.node.json --incremental && electron .",
+    "dev:main:build": "tsc -p tsconfig.node.json --watch --preserveWatchOutput",
+    "dev:prepare": "node -e \"try{require('fs').unlinkSync('dist/main/index.js')}catch{}\"",
+    "dev": "npm run dev:prepare && concurrently -k -n vite,tsc,app \"npm run dev:renderer\" \"npm run dev:main:build\" \"wait-on http://localhost:5210 dist/main/index.js && electron .\"",
     "build:renderer": "vite build",
     "build:main": "tsc -p tsconfig.node.json",
     "build": "npm run build:renderer && npm run build:main",

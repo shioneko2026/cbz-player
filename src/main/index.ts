@@ -61,38 +61,55 @@ protocol.registerSchemesAsPrivileged([
 // click "Open / Compare in CBZ Player" verbs with multiple files selected —
 // Windows fires the verb command once per file) fail to acquire the lock,
 // send their argv into the running app via the auto-handed-off
-// 'second-instance' event, then immediately exit.
+// 'second-instance' event, then immediately exit via app.exit(0). We use
+// app.exit (not app.quit) because quit is async and lets module init keep
+// running — Electron occasionally flashes a brief window before the quit
+// processes. exit is immediate and silent.
 const singleInstanceGotLock = app.requestSingleInstanceLock();
 if (!singleInstanceGotLock) {
-  // Another instance is running. Let it pick up our argv via second-instance
-  // (Electron does this automatically) and bow out.
-  app.quit();
+  app.exit(0);
 }
 
 // Buffer for explorer-launched arguments. Windows fires the verb command
 // once per file when multi-selected, so we get a flurry of `second-instance`
-// events (or argv tokens from our cold start) over ~50ms. The debounce
-// flushes once after a quiet period so we batch them into a single
-// "what did the user want?" decision.
-type PendingArg = { path: string; isCompare: boolean };
+// events (or argv tokens from our cold start). The debounce flushes after a
+// quiet period so we batch them into one "what did the user want?" decision.
+// 400ms tested empirically: short enough to feel responsive on single-file
+// double-click, long enough to catch the spread-out second-instance arrivals
+// on 10+ multi-selects.
+type PendingArg = { path: string; isCompare: boolean; isAppend: boolean; isFolder: boolean };
 let pendingArgs: PendingArg[] = [];
 let pendingFlushTimer: NodeJS.Timeout | null = null;
-const PENDING_FLUSH_DEBOUNCE_MS = 150;
+const PENDING_FLUSH_DEBOUNCE_MS = 400;
 
-/** Parse an argv array (from cold start or a second-instance event) for `.cbz`
- *  file paths and `--compare` flag tokens. Returns one PendingArg per .cbz path,
- *  marking each as compare-mode if `--compare` appears anywhere in the same
- *  invocation's argv. */
+// Stragger-grouping: any flush that fires within this window after the previous
+// one is treated as the same multi-select operation, forced to APPEND mode
+// (because Windows split the multi-select across spawns and some second-
+// instance events arrived after the first flush had already dispatched).
+// Without this, a 10-file multi-select where stragglers spread over 500ms+
+// would dispatch the first batch as "replace" and each straggler as "replace"
+// again — leaving only the last file in the playlist.
+const STRAGGER_GROUPING_WINDOW_MS = 2500;
+let lastFlushTime = 0;
+
+/** Parse an argv array (from cold start or a second-instance event) for file
+ *  paths and our custom flag tokens. Each returned PendingArg carries the
+ *  flag state seen in the SAME argv batch — different verbs invoke with
+ *  different flag sets, and the dispatch logic uses these to decide what
+ *  kind of action to take. */
 function parseExplorerArgv(argv: string[]): PendingArg[] {
-  // Strip the executable path (argv[0]) and, in dev mode, the script entry.
-  // Anything starting with `--` is treated as a flag; anything ending in `.cbz`
-  // is treated as a file path. Quoting was already handled by the shell.
-  const isCompareInvocation = argv.includes('--compare');
+  const isCompare = argv.includes('--compare');
+  const isAppend = argv.includes('--append');
+  const isFolder = argv.includes('--folder');
   const paths: PendingArg[] = [];
   for (const token of argv) {
     if (!token || token.startsWith('--')) continue;
-    if (token.toLowerCase().endsWith('.cbz')) {
-      paths.push({ path: token, isCompare: isCompareInvocation });
+    if (isFolder) {
+      // Folder verb: %1 is a directory path (not a .cbz). Accept any non-flag
+      // token. We'll scan it for .cbz files at dispatch time.
+      paths.push({ path: token, isCompare, isAppend, isFolder });
+    } else if (token.toLowerCase().endsWith('.cbz')) {
+      paths.push({ path: token, isCompare, isAppend, isFolder });
     }
   }
   return paths;
@@ -108,9 +125,10 @@ function enqueueExplorerArgs(args: PendingArg[]) {
 }
 
 /** Flush the buffered explorer args: figure out what kind of invocation this
- *  was (Compare with exactly 2 files vs Open with N files) and route to the
- *  appropriate IPC event on the viewer renderer. Graceful fallback if the
- *  user invoked the Compare verb with the wrong number of files. */
+ *  was (Compare with exactly 2 files / folder Open / regular Open / append)
+ *  and route to the appropriate IPC event on the viewer renderer. Graceful
+ *  fallback when invariants don't hold (Compare with !=2 files, folder
+ *  contains no .cbz, etc.). */
 function flushExplorerArgs() {
   pendingFlushTimer = null;
   const batch = pendingArgs;
@@ -145,6 +163,8 @@ function flushExplorerArgs() {
   vw.focus();
 
   const compareFlagged = batch.some(a => a.isCompare);
+  const appendFlagged = batch.some(a => a.isAppend);
+  const folderFlagged = batch.some(a => a.isFolder);
   const allPaths = batch.map(a => a.path);
   // Dedupe while preserving order — Explorer can fire the same path twice
   // under certain shell extensions.
@@ -156,11 +176,28 @@ function flushExplorerArgs() {
     return true;
   });
 
+  // Folder verb: each path is a directory. Scan all of them, combine, treat
+  // as a single Open (replace) — the user picked a folder to "go look at."
+  if (folderFlagged) {
+    const collected: ReturnType<typeof getFileInfoFromPaths> = [];
+    const sortDest = paths[0] ?? null;
+    for (const folder of paths) {
+      const found = scanForCbzFiles(folder);
+      for (const f of found) collected.push(f);
+    }
+    lastFlushTime = Date.now();
+    if (collected.length > 0) {
+      vw.webContents.send('explorer:open', { files: collected, mode: 'replace', sortDestination: sortDest });
+    }
+    return;
+  }
+
   if (compareFlagged && paths.length === 2) {
     // The intended Compare invocation: hand the 2 files to the renderer for
     // ad-hoc compare (preserves existing playlist per Phase 11 design).
     const files = getFileInfoFromPaths(paths);
     if (files.length === 2) {
+      lastFlushTime = Date.now();
       vw.webContents.send('explorer:compare', { left: files[0], right: files[1] });
       return;
     }
@@ -168,15 +205,25 @@ function flushExplorerArgs() {
     // Fall through to the open path so at least something happens.
   }
 
-  // Default Open path. Single file = REPLACE the playlist, multi = APPEND.
-  // Mirrors the in-app drag-drop semantics per Phase 11 design. sortDestination
-  // is the common parent folder when all files share one (so sort actions land
-  // in the right place); falls back to null when files come from multiple
-  // folders (matching the in-app multi-source drop behavior).
-  const mode: 'replace' | 'append' = paths.length === 1 ? 'replace' : 'append';
+  // Default Open path. Mode selection:
+  //   - --append flag: always APPEND (the "Add to CBZ Player Playlist" verb)
+  //   - Stragger: a second batch arriving within STRAGGER_GROUPING_WINDOW_MS
+  //     after the previous flush is treated as the same multi-select op. The
+  //     first batch may have been "single file replace"; the stragglers must
+  //     APPEND to it or we'd lose all the earlier loads. This is the fix for
+  //     "select 10 .cbz files, only the last one ends up in the playlist."
+  //   - Single file (no special flag, no stragger): REPLACE the playlist,
+  //     matching the in-app drop semantics for dropping on the viewer.
+  //   - Multi-file (no special flag, no stragger): APPEND, matching the
+  //     in-app drop semantics for dropping on the playlist panel.
+  const now = Date.now();
+  const isStragger = lastFlushTime > 0 && (now - lastFlushTime) < STRAGGER_GROUPING_WINDOW_MS;
+  const mode: 'replace' | 'append' =
+    appendFlagged || isStragger || paths.length > 1 ? 'append' : 'replace';
   const files = getFileInfoFromPaths(paths);
   if (files.length > 0) {
     const sortDestination = detectSortDestination(paths);
+    lastFlushTime = now;
     vw.webContents.send('explorer:open', { files, mode, sortDestination });
   }
 }

@@ -88,4 +88,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onPlaylistAction: (callback: (action: any) => void) => {
     ipcRenderer.on('playlist:action-received', (_event, action) => callback(action));
   },
+
+  // Explorer launch dispatch (main → viewer). Fired after the debounce in main
+  // batches a cold-start or second-instance argv into one logical user action.
+  onExplorerOpen: (callback: (payload: { files: any[]; mode: 'replace' | 'append'; sortDestination: string | null }) => void) => {
+    ipcRenderer.on('explorer:open', (_event, payload) => callback(payload));
+  },
+  onExplorerCompare: (callback: (payload: { left: any; right: any }) => void) => {
+    ipcRenderer.on('explorer:compare', (_event, payload) => callback(payload));
+  },
 });

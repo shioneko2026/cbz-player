@@ -55,14 +55,140 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'cbz-image', privileges: { standard: true, secure: true, supportFetchAPI: true } },
 ]);
 
+// ─── Single-instance lock ───────────────────────────────────────────────────
+// First launch acquires the lock and becomes the long-running app. Subsequent
+// launches (e.g. user double-clicks a .cbz in Explorer, or invokes the right-
+// click "Open / Compare in CBZ Player" verbs with multiple files selected —
+// Windows fires the verb command once per file) fail to acquire the lock,
+// send their argv into the running app via the auto-handed-off
+// 'second-instance' event, then immediately exit.
+const singleInstanceGotLock = app.requestSingleInstanceLock();
+if (!singleInstanceGotLock) {
+  // Another instance is running. Let it pick up our argv via second-instance
+  // (Electron does this automatically) and bow out.
+  app.quit();
+}
+
+// Buffer for explorer-launched arguments. Windows fires the verb command
+// once per file when multi-selected, so we get a flurry of `second-instance`
+// events (or argv tokens from our cold start) over ~50ms. The debounce
+// flushes once after a quiet period so we batch them into a single
+// "what did the user want?" decision.
+type PendingArg = { path: string; isCompare: boolean };
+let pendingArgs: PendingArg[] = [];
+let pendingFlushTimer: NodeJS.Timeout | null = null;
+const PENDING_FLUSH_DEBOUNCE_MS = 150;
+
+/** Parse an argv array (from cold start or a second-instance event) for `.cbz`
+ *  file paths and `--compare` flag tokens. Returns one PendingArg per .cbz path,
+ *  marking each as compare-mode if `--compare` appears anywhere in the same
+ *  invocation's argv. */
+function parseExplorerArgv(argv: string[]): PendingArg[] {
+  // Strip the executable path (argv[0]) and, in dev mode, the script entry.
+  // Anything starting with `--` is treated as a flag; anything ending in `.cbz`
+  // is treated as a file path. Quoting was already handled by the shell.
+  const isCompareInvocation = argv.includes('--compare');
+  const paths: PendingArg[] = [];
+  for (const token of argv) {
+    if (!token || token.startsWith('--')) continue;
+    if (token.toLowerCase().endsWith('.cbz')) {
+      paths.push({ path: token, isCompare: isCompareInvocation });
+    }
+  }
+  return paths;
+}
+
+/** Add a batch of args (from one argv parse) to the pending buffer and
+ *  schedule a debounced flush. */
+function enqueueExplorerArgs(args: PendingArg[]) {
+  if (args.length === 0) return;
+  pendingArgs.push(...args);
+  if (pendingFlushTimer) clearTimeout(pendingFlushTimer);
+  pendingFlushTimer = setTimeout(flushExplorerArgs, PENDING_FLUSH_DEBOUNCE_MS);
+}
+
+/** Flush the buffered explorer args: figure out what kind of invocation this
+ *  was (Compare with exactly 2 files vs Open with N files) and route to the
+ *  appropriate IPC event on the viewer renderer. Graceful fallback if the
+ *  user invoked the Compare verb with the wrong number of files. */
+function flushExplorerArgs() {
+  pendingFlushTimer = null;
+  const batch = pendingArgs;
+  pendingArgs = [];
+  if (batch.length === 0) return;
+
+  const vw = getViewerWindow();
+  if (!vw || vw.isDestroyed()) {
+    // Renderer not ready yet. Re-queue and try again shortly.
+    pendingArgs.push(...batch);
+    pendingFlushTimer = setTimeout(flushExplorerArgs, 250);
+    return;
+  }
+
+  // Bring window forward (matters for second-instance — user clicked something
+  // in Explorer, they probably want to see the app).
+  if (vw.isMinimized()) vw.restore();
+  vw.focus();
+
+  const compareFlagged = batch.some(a => a.isCompare);
+  const allPaths = batch.map(a => a.path);
+  // Dedupe while preserving order — Explorer can fire the same path twice
+  // under certain shell extensions.
+  const seen = new Set<string>();
+  const paths = allPaths.filter(p => {
+    const k = p.toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+
+  if (compareFlagged && paths.length === 2) {
+    // The intended Compare invocation: hand the 2 files to the renderer for
+    // ad-hoc compare (preserves existing playlist per Phase 11 design).
+    const files = getFileInfoFromPaths(paths);
+    if (files.length === 2) {
+      vw.webContents.send('explorer:compare', { left: files[0], right: files[1] });
+      return;
+    }
+    // Files couldn't be statted (deleted between right-click and dispatch).
+    // Fall through to the open path so at least something happens.
+  }
+
+  // Default Open path. Single file = REPLACE the playlist, multi = APPEND.
+  // Mirrors the in-app drag-drop semantics per Phase 11 design. sortDestination
+  // is the common parent folder when all files share one (so sort actions land
+  // in the right place); falls back to null when files come from multiple
+  // folders (matching the in-app multi-source drop behavior).
+  const mode: 'replace' | 'append' = paths.length === 1 ? 'replace' : 'append';
+  const files = getFileInfoFromPaths(paths);
+  if (files.length > 0) {
+    const sortDestination = detectSortDestination(paths);
+    vw.webContents.send('explorer:open', { files, mode, sortDestination });
+  }
+}
+
 // Undo-trash holding folder. Purges go here first (instead of straight to
 // the Recycle Bin) so they can be undone via Ctrl+Z. On the next purge, on
 // app quit, or on next startup (sweep), held files graduate to the actual
 // Windows Recycle Bin via shell.trashItem.
 const holdingFolder = path.join(app.getPath('userData'), 'cbz-player-undo-trash');
 
+// Subsequent launches (Explorer right-click → Open / Compare with multi-select,
+// or any other second invocation) hand their argv to this instance via Electron's
+// second-instance event. Parse + enqueue; the debounce in flushExplorerArgs
+// batches the per-file invocations Windows fires.
+app.on('second-instance', (_event, argv, _workingDirectory) => {
+  enqueueExplorerArgs(parseExplorerArgv(argv));
+});
+
 app.whenReady().then(() => {
   const config = loadConfig();
+
+  // Cold-start argv from Explorer (.cbz files passed by Windows when the user
+  // double-clicks / Open With / Compare from a fresh state). Same parser as
+  // second-instance; debounce ensures cold-start argv and any rapid follow-up
+  // second-instance events get batched together.
+  enqueueExplorerArgs(parseExplorerArgv(process.argv));
 
   // Ensure the holding folder exists, and sweep anything stranded by a
   // previous crashed/force-closed session into the real Recycle Bin.

@@ -29,6 +29,12 @@ HANDOFF.md
 # Temp extraction dirs
 cbz-sorter-viewer/
 
+# Icon source PNGs (kept locally as source-of-truth for build/icon.ico
+# regeneration; the .ico itself IS tracked). Excluded because the PNGs
+# can be large (~1.5 MB for the current source) and the .ico is the
+# only thing electron-builder actually consumes.
+build/*.png
+
 # Personal CBZ test folders sitting in project root — DO NOT commit personal collection content.
 # Add new entries here whenever you drop a CBZ folder into the project root for testing.
 /\[Pony-R\]*/

@@ -1,22 +1,29 @@
 ; ─── CBZ Player custom NSIS install/uninstall macros ─────────────────────────
 ;
 ; electron-builder's `fileAssociations` config registers the default Open verb
-; for .cbz (so double-click and "Open with CBZ Player" work). This file adds
-; a CUSTOM right-click verb — "Compare in CBZ Player" — that electron-builder
-; doesn't generate on its own. The Compare verb fires the same executable with
-; a `--compare` flag, which the main process detects (via argv parsing in
-; src/main/index.ts) and routes through the second-instance debounce so a
-; multi-select of 2 files lands as one ad-hoc compare invocation.
+; for .cbz (so double-click and "Open with CBZ Player" work, and "Make default
+; via Windows Settings" flips the .cbz default handler to our ProgID). This
+; file adds CUSTOM right-click verbs — Compare 2, Add to Playlist, Repack —
+; that electron-builder doesn't generate on its own.
+;
+; ARCHITECTURE NOTE (session 11): the custom .cbz verbs live under
+; HKCU\Software\Classes\SystemFileAssociations\.cbz\shell\* rather than the
+; ProgID's shell\ subkey. SystemFileAssociations is Microsoft's documented
+; additive-verb mechanism that fires regardless of which app is the active
+; default handler for the extension. The old ProgID-only location (used in
+; v0.9.0-session10) made the verbs invisible unless CBZ Player was set as
+; the default .cbz app — a workflow friction the user surfaced during
+; session 11 stress testing. Same pattern is used for .zip/.rar/.7z Repack.
 ;
 ; Per-user install (HKCU), no admin elevation. All keys are removed on
 ; uninstall.
 ;
-; PROGID NOTE: electron-builder uses the `name` field from fileAssociations
-; (here: "CBZ Archive") AS the registry ProgID key — NOT the convention
-; `<exe>.<ext>` we initially assumed. Empirically verified by inspecting
-; HKCU\Software\Classes\ after install. The Compare verb must be written
-; under the SAME ProgID Windows actually consults when reading verbs for
-; .cbz files, or it never appears in the right-click menu.
+; PROGID NOTE (kept for historical context): electron-builder uses the
+; `name` field from fileAssociations (here: "CBZ Archive") AS the registry
+; ProgID key — NOT the convention `<exe>.<ext>` we initially assumed.
+; Empirically verified by inspecting HKCU\Software\Classes\ after install.
+; The default Open verb that electron-builder generates IS still under the
+; ProgID — we just don't put our custom verbs there anymore.
 
 !define PROGID "CBZ Archive"
 
@@ -26,38 +33,49 @@
   ; build don't have stale keys after upgrading.
   DeleteRegKey HKCU "Software\Classes\${APP_EXECUTABLE_FILENAME}.cbz"
 
-  ; ── Verb 1: "Compare in CBZ Player" ─────────────────────────────────────
-  ; Shows on right-click of any .cbz (visibility can't be conditional on
-  ; selection-count without a shell extension DLL — too heavy for v1). When
-  ; invoked with != 2 files the main process gracefully falls back to a normal
-  ; playlist load with a log entry explaining what happened.
-  ; NOTE: ${APP_EXECUTABLE_FILENAME} already INCLUDES the .exe extension.
-  ; Appending another .exe produces "CBZ Player.exe.exe" which doesn't exist.
-  ; Label says "Compare 2" so the user knows the verb needs exactly 2 files
+  ; Migration: session 11 moved the .cbz custom verbs from ${PROGID} to
+  ; SystemFileAssociations. Clean up the old ProgID-located keys so they
+  ; don't linger after over-install (NSIS over-install doesn't run
+  ; customUnInstall, so this migration has to happen in customInstall).
+  DeleteRegKey HKCU "Software\Classes\${PROGID}\shell\compare"
+  DeleteRegKey HKCU "Software\Classes\${PROGID}\shell\addtoplaylist"
+  DeleteRegKey HKCU "Software\Classes\${PROGID}\shell\repack"
+
+  ; ── Verb 1: "Compare 2 in CBZ Player" on .cbz ───────────────────────────
+  ; Shows on right-click of any .cbz REGARDLESS of which app is the default
+  ; .cbz handler. SystemFileAssociations is Windows' documented additive-
+  ; verb mechanism that doesn't disrupt whatever else is registered.
+  ;
+  ; Label is "Compare 2" so the user knows the verb needs exactly 2 files
   ; selected. We can't conditionally hide the verb based on selection count
   ; without a shell extension DLL (rejected as overkill for v1) — explicit
   ; label is the cheap-but-clear alternative. Invocation with !=2 files
   ; gracefully falls back to a normal Open (no error dialog).
-  WriteRegStr HKCU "Software\Classes\${PROGID}\shell\compare" "" "Compare 2 in CBZ Player"
-  WriteRegStr HKCU "Software\Classes\${PROGID}\shell\compare" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
-  WriteRegStr HKCU "Software\Classes\${PROGID}\shell\compare\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --compare "%1"'
+  ;
+  ; NOTE: ${APP_EXECUTABLE_FILENAME} already INCLUDES the .exe extension.
+  ; Appending another .exe produces "CBZ Player.exe.exe" which doesn't exist.
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\compare" "" "Compare 2 in CBZ Player"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\compare" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\compare\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --compare "%1"'
 
-  ; ── Verb 2: "Add to CBZ Player Playlist" ────────────────────────────────
-  ; Shows on right-click of any .cbz. Always appends (regardless of file
-  ; count or whether the app is currently running). Useful when the user
-  ; wants to explicitly add files to an existing playlist instead of letting
-  ; the default Open verb decide replace-vs-append based on count.
-  WriteRegStr HKCU "Software\Classes\${PROGID}\shell\addtoplaylist" "" "Add to CBZ Player Playlist"
-  WriteRegStr HKCU "Software\Classes\${PROGID}\shell\addtoplaylist" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
-  WriteRegStr HKCU "Software\Classes\${PROGID}\shell\addtoplaylist\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --append "%1"'
+  ; ── Verb 2: "Add to CBZ Player Playlist" on .cbz ────────────────────────
+  ; Shows on right-click of any .cbz REGARDLESS of default handler. Always
+  ; appends (regardless of file count or whether the app is currently
+  ; running). Useful when the user wants to explicitly add files to an
+  ; existing playlist instead of letting the default Open verb decide
+  ; replace-vs-append based on count.
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\addtoplaylist" "" "Add to CBZ Player Playlist"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\addtoplaylist" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\addtoplaylist\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --append "%1"'
 
   ; ── Verb 3a: "Repack this CBZ" on .cbz files ────────────────────────────
-  ; Shows on right-click of any .cbz. Loads the file into the playlist,
-  ; extracts, and enters repack mode automatically once extraction completes.
-  ; Single-file operation — if user multi-selects, only the first is taken.
-  WriteRegStr HKCU "Software\Classes\${PROGID}\shell\repack" "" "Repack this CBZ"
-  WriteRegStr HKCU "Software\Classes\${PROGID}\shell\repack" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
-  WriteRegStr HKCU "Software\Classes\${PROGID}\shell\repack\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --repack "%1"'
+  ; Shows on right-click of any .cbz REGARDLESS of default handler. Loads
+  ; the file into the playlist, extracts, and enters repack mode
+  ; automatically once extraction completes. Single-file operation — if
+  ; user multi-selects, only the first is taken.
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\repack" "" "Repack this CBZ"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\repack" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\repack\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --repack "%1"'
 
   ; ── Verb 3b: "Repack with CBZ Player" on non-.cbz archive types ─────────
   ; Same Repack verb, added to .zip / .rar / .7z via SystemFileAssociations
@@ -78,7 +96,7 @@
   WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.7z\shell\repack" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
   WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.7z\shell\repack\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --repack "%1"'
 
-  ; ── Verb 3: "Open in CBZ Player" (folder context menu) ───────────────────
+  ; ── Verb 4: "Open in CBZ Player" (folder context menu) ──────────────────
   ; Shows on right-click of any FOLDER (not .cbz files). Scans the folder
   ; for .cbz files and loads them all as a fresh playlist. The folder path
   ; doubles as the sort destination (matches "load the folder" intent).
@@ -96,14 +114,19 @@
   ; Remove all custom verb registry entries we created. The default Open verb
   ; on .cbz (and the .cbz association itself) are removed by electron-builder's
   ; own uninstall logic based on the fileAssociations config.
-  DeleteRegKey HKCU "Software\Classes\${PROGID}\shell\compare"
-  DeleteRegKey HKCU "Software\Classes\${PROGID}\shell\addtoplaylist"
-  DeleteRegKey HKCU "Software\Classes\${PROGID}\shell\repack"
+  DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\compare"
+  DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\addtoplaylist"
+  DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\repack"
   DeleteRegKey HKCU "Software\Classes\Directory\shell\OpenInCbzPlayer"
   DeleteRegKey HKCU "Software\Classes\Directory\Background\shell\OpenInCbzPlayer"
   DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.zip\shell\repack"
   DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.rar\shell\repack"
   DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.7z\shell\repack"
+  ; Belt-and-suspenders: clean up any leftover ProgID-located entries from
+  ; pre-session-11 installs that didn't get the customInstall migration.
+  DeleteRegKey HKCU "Software\Classes\${PROGID}\shell\compare"
+  DeleteRegKey HKCU "Software\Classes\${PROGID}\shell\addtoplaylist"
+  DeleteRegKey HKCU "Software\Classes\${PROGID}\shell\repack"
   ; Belt-and-suspenders: clean any leftover from the broken-ProgID era.
   DeleteRegKey HKCU "Software\Classes\${APP_EXECUTABLE_FILENAME}.cbz"
 !macroend

@@ -13,6 +13,78 @@ import { saveSessionLog } from './session-logger';
 // Track which window type each webContents ID maps to
 const windowTypeMap = new Map<number, 'viewer' | 'playlist'>();
 
+// Inline C# that calls Windows' IFileOperation directly to send a file to the
+// Recycle Bin. Used as the long-path fallback in trashWithFallback because:
+//   - shell.trashItem (Electron's wrapper) fails for some long paths because of
+//     internal GetFullPathName limits inside the Chromium wrapper.
+//   - Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile (the previous fallback)
+//     is fundamentally incompatible with long paths: throws PathTooLongException
+//     for paths >MAX_PATH (260 chars) unprefixed, and NotSupportedException
+//     ("format not supported") for the same paths with a \\?\ namespace prefix.
+//   - IFileOperation uses Unicode shell APIs throughout and natively supports
+//     long paths. SHCreateItemFromParsingName accepts the Unicode path directly
+//     without needing a \\?\ prefix (and rejects \\?\-prefixed paths).
+// Flags: FOF_SILENT | FOF_NOCONFIRMATION | FOF_ALLOWUNDO | FOF_NOERRORUI |
+// FOFX_RECYCLEONDELETE — send to Recycle Bin only (no permanent-delete
+// fallback), no UI, no error dialogs (errors come back as exceptions).
+const LONG_PATH_TRASH_CSHARP = `
+using System;
+using System.Runtime.InteropServices;
+public class LongPathTrash {
+    [ComImport, Guid("3AD05575-8857-4850-9277-11B85BDB8E09"), ClassInterface(ClassInterfaceType.None)]
+    private class CFileOperation {}
+    [ComImport, Guid("947AAB5F-0A5C-4C13-B4D6-4BF7836FC9F8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IFileOperation {
+        void Advise(IntPtr p, out uint c);
+        void Unadvise(uint c);
+        void SetOperationFlags(uint flags);
+        void SetProgressMessage(string m);
+        void SetProgressDialog(IntPtr p);
+        void SetProperties(IntPtr p);
+        void SetOwnerWindow(IntPtr h);
+        void ApplyPropertiesToItem(IShellItem item);
+        void ApplyPropertiesToItems([MarshalAs(UnmanagedType.IUnknown)] object items);
+        void RenameItem(IShellItem item, string newName, IntPtr cb);
+        void RenameItems([MarshalAs(UnmanagedType.IUnknown)] object items, string newName);
+        void MoveItem(IShellItem item, IShellItem dest, string newName, IntPtr cb);
+        void MoveItems([MarshalAs(UnmanagedType.IUnknown)] object items, IShellItem dest);
+        void CopyItem(IShellItem item, IShellItem dest, string copyName, IntPtr cb);
+        void CopyItems([MarshalAs(UnmanagedType.IUnknown)] object items, IShellItem dest);
+        void DeleteItem(IShellItem item, IntPtr cb);
+        void DeleteItems([MarshalAs(UnmanagedType.IUnknown)] object items);
+        void NewItem(IShellItem dest, uint attrs, string name, string templateName, IntPtr cb);
+        void PerformOperations();
+        void GetAnyOperationsAborted([MarshalAs(UnmanagedType.Bool)] out bool aborted);
+    }
+    [ComImport, Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IShellItem {
+        void BindToHandler(IntPtr p, ref Guid b, ref Guid r, out IntPtr v);
+        void GetParent(out IShellItem p);
+        void GetDisplayName(uint s, [MarshalAs(UnmanagedType.LPWStr)] out string n);
+        void GetAttributes(uint m, out uint a);
+        void Compare(IShellItem p, uint h, out int o);
+    }
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+    private static extern void SHCreateItemFromParsingName(
+        [MarshalAs(UnmanagedType.LPWStr)] string pszPath,
+        IntPtr pbc, ref Guid riid,
+        [MarshalAs(UnmanagedType.Interface)] out IShellItem ppv);
+    public static void SendToRecycleBin(string path) {
+        var op = (IFileOperation)new CFileOperation();
+        try {
+            op.SetOperationFlags(0x0004u | 0x0010u | 0x0040u | 0x0400u | 0x00080000u);
+            var g = typeof(IShellItem).GUID;
+            IShellItem item;
+            SHCreateItemFromParsingName(path, IntPtr.Zero, ref g, out item);
+            try {
+                op.DeleteItem(item, IntPtr.Zero);
+                op.PerformOperations();
+            } finally { Marshal.ReleaseComObject(item); }
+        } finally { Marshal.ReleaseComObject(op); }
+    }
+}
+`;
+
 /** Copy a Node Buffer into an ArrayBuffer so Response's BodyInit typing accepts it. */
 function bufferToBody(buf: Buffer): ArrayBuffer {
   const ab = new ArrayBuffer(buf.byteLength);
@@ -560,20 +632,38 @@ app.whenReady().then(() => {
   }
 
   async function trashWithFallback(filePath: string): Promise<void> {
-    // Long paths (>260 chars) need the \\?\ namespace prefix to survive Windows'
-    // legacy MAX_PATH limit. Both shell.trashItem (Windows IFileOperation under
-    // the hood) and VB FileIO.DeleteFile honor the prefix.
-    const nspPath = path.toNamespacedPath(filePath);
+    // Try Electron's shell.trashItem first. It's fast and well-tested for
+    // typical paths. Do NOT add a \\?\ prefix here — its underlying
+    // SHCreateItemFromParsingName backend doesn't accept that path format
+    // (the session-11 first fix tried that; it just changed the failure mode).
+    let primaryErr: any = null;
     try {
-      await shell.trashItem(nspPath);
-    } catch {
-      await new Promise<void>((resolve, reject) => {
-        const script = `Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('${nspPath.replace(/'/g, "''")}', 'OnlyErrorDialogs', 'SendToRecycleBin')`;
-        execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 10000 }, (err: any, _stdout: string, stderr: string) => {
-          if (err) reject(new Error(stderr || err.message)); else resolve();
-        });
-      });
+      await shell.trashItem(filePath);
+      return;
+    } catch (err: any) {
+      primaryErr = err;
     }
+
+    // shell.trashItem failed. Fall back to direct IFileOperation via inline C#
+    // in PowerShell. The previous fallback used Microsoft.VisualBasic.FileIO
+    // .FileSystem.DeleteFile, which is fundamentally incompatible with long
+    // paths (PathTooLongException without prefix; NotSupportedException with
+    // \\?\ prefix). IFileOperation uses Unicode shell APIs throughout and
+    // handles long paths natively. See LONG_PATH_TRASH_CSHARP at the top of
+    // this file for the full background and flag rationale.
+    await new Promise<void>((resolve, reject) => {
+      const escaped = filePath.replace(/'/g, "''");
+      const script = `Add-Type -TypeDefinition @'\n${LONG_PATH_TRASH_CSHARP}\n'@\n[LongPathTrash]::SendToRecycleBin('${escaped}')`;
+      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 15000 }, (err: any, _stdout: string, stderr: string) => {
+        if (err) {
+          const reason = (stderr?.trim()) || err.message || 'unknown';
+          const primary = primaryErr?.message || primaryErr || 'unknown';
+          reject(new Error(`Trash failed. shell.trashItem: ${primary}. IFileOperation: ${reason}`));
+        } else {
+          resolve();
+        }
+      });
+    });
   }
 
   ipcMain.handle('file:sort', async (_event, filePath: string, categoryId: string, sortDestination: string) => {

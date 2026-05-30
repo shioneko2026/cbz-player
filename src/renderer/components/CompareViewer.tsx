@@ -121,6 +121,16 @@ export default function CompareViewer(props: CompareViewerProps) {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'i') {
         e.preventDefault(); toggleSync(); return;
       }
+      // Ctrl+F cycles fit mode: Fit → Height → Width → Fit. Same behavior as
+      // the main CbzViewer; local to this component because fitMode is local.
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        setFitMode(curr => {
+          const cycle: FitMode[] = ['fit-page', 'fit-height', 'fit-width'];
+          return cycle[(cycle.indexOf(curr) + 1) % cycle.length];
+        });
+        return;
+      }
 
       const side = hoveredSide ?? 'left';
       const goPage = side === 'left' ? goLeftPage : goRightPage;
@@ -264,7 +274,7 @@ export default function CompareViewer(props: CompareViewerProps) {
             {synced ? '🔗 Synced' : '🔓 Independent'}
           </button>
           <div className="flex gap-1">
-            {([['fit-page', 'Fit'], ['fit-width', 'Width'], ['fit-height', 'Height']] as const).map(([mode, label]) => (
+            {([['fit-page', 'Fit'], ['fit-height', 'Height'], ['fit-width', 'Width']] as const).map(([mode, label]) => (
               <button key={mode} onClick={() => setFitMode(mode)} className={`${btnBase} ${fitMode === mode ? btnActive : ''}`}>{label}</button>
             ))}
           </div>

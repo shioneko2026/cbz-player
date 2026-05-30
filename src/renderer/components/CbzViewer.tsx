@@ -83,6 +83,26 @@ export default function CbzViewer({ images, extractionId, darkMode, onPageChange
     return () => observer.disconnect();
   }, []);
 
+  // Ctrl+F cycles fit mode: Fit → Height → Width → Fit. Local listener (not in
+  // useHotkeys) because fitMode is local component state — same pattern as
+  // RepackViewer's Ctrl+S and CompareViewer's Ctrl+I. Guarded so it doesn't
+  // fire when typing in inputs (rename, settings, etc.).
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey) return;
+      if (e.key.toLowerCase() !== 'f') return;
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
+      e.preventDefault();
+      setFitMode(curr => {
+        const cycle: FitMode[] = ['fit-page', 'fit-height', 'fit-width'];
+        return cycle[(cycle.indexOf(curr) + 1) % cycle.length];
+      });
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
+
   // Center offset logic:
   // Without center mode: images are centered in the viewer pane (left of panel).
   // With center mode: we want images centered on the FULL SCREEN.
@@ -434,7 +454,7 @@ export default function CbzViewer({ images, extractionId, darkMode, onPageChange
       >
         {/* Fit Mode */}
         <div className="flex gap-1">
-          {([['fit-page', 'Fit'], ['fit-width', 'Width'], ['fit-height', 'Height']] as const).map(([mode, label]) => (
+          {([['fit-page', 'Fit'], ['fit-height', 'Height'], ['fit-width', 'Width']] as const).map(([mode, label]) => (
             <button key={mode} onClick={() => setFitMode(mode)}
               className={`${btnBase} ${fitMode === mode ? btnActive : ''}`}>{label}</button>
           ))}

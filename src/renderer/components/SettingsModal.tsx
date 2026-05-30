@@ -600,6 +600,7 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
                   ['Ctrl+3', 'Dual RTL'],
                   ['Ctrl+4', 'Vertical scroll'],
                   ['Ctrl+E', 'Toggle center page'],
+                  ['Ctrl+F', 'Cycle fit mode: Fit → Height → Width'],
                 ]],
                 ['Modes', [
                   ['Ctrl+Shift+C', 'Enter compare mode (pick with current)'],

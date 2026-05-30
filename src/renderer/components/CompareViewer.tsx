@@ -50,6 +50,13 @@ export default function CompareViewer(props: CompareViewerProps) {
   const [leftPage, setLeftPage] = useState(0);
   const [rightPage, setRightPage] = useState(0);
   const [synced, setSynced] = useState(true);
+  // Offset between right and left pages (right - left) captured when sync is
+  // enabled. Allows the user to manually align two doujins that have a page
+  // offset (e.g. one has a blank insert page) by: disable sync, navigate each
+  // side independently to the matching pages, re-enable sync. From then on,
+  // navigation moves both sides by the same delta, preserving the alignment.
+  // At default (both pages 0, sync enabled), offset = 0 — same as old behavior.
+  const [syncOffset, setSyncOffset] = useState(0);
   const [fitMode, setFitMode] = useState<FitMode>('fit-page');
   const [zoom, setZoom] = useState(1);
   const [showControls, setShowControls] = useState(true);
@@ -70,18 +77,41 @@ export default function CompareViewer(props: CompareViewerProps) {
   const leftTotal = leftImages.length;
   const rightTotal = rightImages.length;
 
-  // Page navigation
+  // Page navigation. When sync is on, the "other" side targets `clamped +/-
+  // syncOffset` and is clamped to its own range. If the offset would push the
+  // other side past its boundary, that side sticks at the boundary while this
+  // side continues — preserves the "keep scrolling the longer file alone"
+  // behavior the user relies on. When the navigating side comes back into the
+  // range where the offset is satisfiable, sync re-engages automatically.
   const goLeftPage = useCallback((p: number) => {
     const clamped = Math.max(0, Math.min(p, leftTotal - 1));
     setLeftPage(clamped);
-    if (synced) setRightPage(Math.max(0, Math.min(clamped, rightTotal - 1)));
-  }, [leftTotal, rightTotal, synced]);
+    if (synced) {
+      const targetRight = clamped + syncOffset;
+      setRightPage(Math.max(0, Math.min(targetRight, rightTotal - 1)));
+    }
+  }, [leftTotal, rightTotal, synced, syncOffset]);
 
   const goRightPage = useCallback((p: number) => {
     const clamped = Math.max(0, Math.min(p, rightTotal - 1));
     setRightPage(clamped);
-    if (synced) setLeftPage(Math.max(0, Math.min(clamped, leftTotal - 1)));
-  }, [leftTotal, rightTotal, synced]);
+    if (synced) {
+      const targetLeft = clamped - syncOffset;
+      setLeftPage(Math.max(0, Math.min(targetLeft, leftTotal - 1)));
+    }
+  }, [leftTotal, rightTotal, synced, syncOffset]);
+
+  // Toggling sync ON captures the current offset (rightPage - leftPage) so the
+  // user's manual alignment is preserved. Toggling sync OFF doesn't reset the
+  // offset — it just stops applying it during navigation. Used by both the
+  // Ctrl+I keyboard shortcut and the on-screen sync button.
+  const toggleSync = useCallback(() => {
+    setSynced(prev => {
+      const next = !prev;
+      if (next) setSyncOffset(rightPage - leftPage);
+      return next;
+    });
+  }, [leftPage, rightPage]);
 
   // Keyboard/scroll navigation based on hovered side
   useEffect(() => {
@@ -89,7 +119,7 @@ export default function CompareViewer(props: CompareViewerProps) {
       if (e.key === 'Escape') { onExit?.(); return; }
       // F11 handled by Electron menu bar accelerator — don't duplicate here
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'i') {
-        e.preventDefault(); setSynced(s => !s); return;
+        e.preventDefault(); toggleSync(); return;
       }
 
       const side = hoveredSide ?? 'left';
@@ -230,7 +260,7 @@ export default function CompareViewer(props: CompareViewerProps) {
         {/* Controls row */}
         <div className="flex items-center justify-center gap-4 px-4 py-1.5">
           <button onClick={onSwap} className={btnBase} title="Swap sides">⇄ Swap</button>
-          <button onClick={() => setSynced(s => !s)} className={`${btnBase} ${synced ? btnActive : ''}`} title="Sync page navigation">
+          <button onClick={toggleSync} className={`${btnBase} ${synced ? btnActive : ''}`} title="Sync page navigation">
             {synced ? '🔗 Synced' : '🔓 Independent'}
           </button>
           <div className="flex gap-1">

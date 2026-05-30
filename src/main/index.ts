@@ -533,13 +533,13 @@ app.whenReady().then(() => {
 
   // ─── Delete Files (to recycle bin) ──────────────────────────────────────────
   ipcMain.handle('file:trash', async (_event, filePaths: string[]) => {
-    const results: { path: string; success: boolean }[] = [];
+    const results: { path: string; success: boolean; error?: string }[] = [];
     for (const fp of filePaths) {
       try {
         await retryOperation(() => trashWithFallback(fp));
         results.push({ path: fp, success: true });
-      } catch {
-        results.push({ path: fp, success: false });
+      } catch (err: any) {
+        results.push({ path: fp, success: false, error: err?.message ?? 'unknown error' });
       }
     }
     return results;
@@ -560,11 +560,15 @@ app.whenReady().then(() => {
   }
 
   async function trashWithFallback(filePath: string): Promise<void> {
+    // Long paths (>260 chars) need the \\?\ namespace prefix to survive Windows'
+    // legacy MAX_PATH limit. Both shell.trashItem (Windows IFileOperation under
+    // the hood) and VB FileIO.DeleteFile honor the prefix.
+    const nspPath = path.toNamespacedPath(filePath);
     try {
-      await shell.trashItem(filePath);
+      await shell.trashItem(nspPath);
     } catch {
       await new Promise<void>((resolve, reject) => {
-        const script = `Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('${filePath.replace(/'/g, "''")}', 'OnlyErrorDialogs', 'SendToRecycleBin')`;
+        const script = `Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('${nspPath.replace(/'/g, "''")}', 'OnlyErrorDialogs', 'SendToRecycleBin')`;
         execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 10000 }, (err: any, _stdout: string, stderr: string) => {
           if (err) reject(new Error(stderr || err.message)); else resolve();
         });

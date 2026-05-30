@@ -27,7 +27,7 @@ declare global {
       unsortFile: (currentPath: string, originalPath: string) => Promise<{ success: boolean; file?: FileInfo; error?: string }>;
       graduatePurge: (heldPath: string) => Promise<{ success: boolean; error?: string }>;
       renameFile: (oldPath: string, newName: string) => Promise<{ success: boolean; file: FileInfo | null; error: string | null }>;
-      trashFiles: (paths: string[]) => Promise<{ path: string; success: boolean }[]>;
+      trashFiles: (paths: string[]) => Promise<{ path: string; success: boolean; error?: string }[]>;
       extractCbz: (cbzPath: string, slot?: string) => Promise<{ images: string[]; imageNames?: string[]; extractionId: string | null; topLevelFolder?: string; error: string | null }>;
       cleanupCbz: (slot?: string) => Promise<void>;
       onExtractionProgress: (callback: (progress: { percent: number; status: string; slot?: string }) => void) => void;
@@ -393,10 +393,23 @@ function usePlaylistState() {
     return Math.min(oldIdx, updated.length - 1);
   }, []);
 
-  const handleDeleteFiles = useCallback(async (paths: string[]) => {
-    if (!window.electronAPI || paths.length === 0) return;
+  const handleDeleteFiles = useCallback(async (paths: string[]): Promise<{ deleted: number; failed: number }> => {
+    if (!window.electronAPI || paths.length === 0) return { deleted: 0, failed: 0 };
     const results = await window.electronAPI.trashFiles(paths);
     const deleted = new Set(results.filter(r => r.success).map(r => r.path));
+    const failed = results.filter(r => !r.success);
+
+    // Fail-loud: surface every trash failure in the in-app log with basename + reason.
+    // The renderer can't see file objects from the IPC result, so pull a basename
+    // from the path itself — works regardless of whether the file is still in `files`.
+    if (failed.length > 0) {
+      const basename = (p: string) => p.split(/[\\/]/).pop() ?? p;
+      for (const f of failed) {
+        const reason = f.error ?? 'trash operation failed (path may be too long or file locked)';
+        addLog(`Failed to delete ${basename(f.path)}: ${reason}`, 'text-red-400', '❌');
+      }
+    }
+
     if (deleted.size > 0) {
       setFiles(prev => {
         const updated = prev.filter(f => !deleted.has(f.fullPath));
@@ -409,7 +422,9 @@ function usePlaylistState() {
         return updated;
       });
     }
-  }, [reconcileCurrentIndex]);
+
+    return { deleted: deleted.size, failed: failed.length };
+  }, [reconcileCurrentIndex, addLog]);
 
   const handleRemoveFromPlaylist = useCallback((paths: string[]) => {
     const toRemove = new Set(paths);
@@ -1201,18 +1216,21 @@ function ViewerWindow() {
             rightCreatedDate={compareSwapped ? compareLeftFile?.createdDate : compareRightFile?.createdDate}
             darkMode={darkMode}
             onSwap={() => setCompareSwapped(s => !s)}
-            onDeleteLeft={() => {
+            onDeleteLeft={async () => {
               const fileToDelete = compareSwapped ? compareRightFile : compareLeftFile;
               if (fileToDelete) {
-                ps.handleDeleteFiles([fileToDelete.fullPath]);
-                ps.exitCompare();
+                // Wait for the actual trash result before exiting compare. If trash
+                // failed (e.g. long-path failure surfaced via addLog), keep compare
+                // open so the user sees they're still on the file that wasn't deleted.
+                const r = await ps.handleDeleteFiles([fileToDelete.fullPath]);
+                if (r.failed === 0) ps.exitCompare();
               }
             }}
-            onDeleteRight={() => {
+            onDeleteRight={async () => {
               const fileToDelete = compareSwapped ? compareLeftFile : compareRightFile;
               if (fileToDelete) {
-                ps.handleDeleteFiles([fileToDelete.fullPath]);
-                ps.exitCompare();
+                const r = await ps.handleDeleteFiles([fileToDelete.fullPath]);
+                if (r.failed === 0) ps.exitCompare();
               }
             }}
             onExit={ps.exitCompare}

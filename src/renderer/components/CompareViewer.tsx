@@ -182,7 +182,12 @@ export default function CompareViewer(props: CompareViewerProps) {
       case 'fit-width': return { ...base, width: '100%', height: 'auto' };
       case 'fit-height': return { ...base, width: 'auto', height: '100%' };
       case 'fit-page':
-      default: return { ...base, maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' as const };
+      default:
+        // Fills the container in both axes + preserves aspect ratio. Replaces
+        // maxWidth/maxHeight (which only constrains) so small images upscale to
+        // fill instead of staying at intrinsic size. See matching change in
+        // CbzViewer for context.
+        return { ...base, width: '100%', height: '100%', objectFit: 'contain' as const };
     }
   };
 

@@ -616,7 +616,7 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
                 ]],
                 ['App', [
                   ['Ctrl+Q', 'Quit'],
-                  ['Ctrl+R', 'Refresh'],
+                  ['Ctrl+R / F5', 'Refresh playlist (re-scan source folder)'],
                   ['F11 / Enter', 'Toggle fullscreen'],
                   ['C', 'Clear log'],
                 ]],

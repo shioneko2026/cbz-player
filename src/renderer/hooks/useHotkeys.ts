@@ -119,6 +119,11 @@ export function useHotkeys({ onAction, includePageNav = false, disabled = false 
       case ']':
       case '\\':
         e.preventDefault(); onAction('next-file'); return;
+      // F5 refreshes the playlist from the source folder. Lives in both-windows
+      // section so it works from either the viewer or detached playlist (the
+      // detached playlist routes it to the viewer via the message bus).
+      case 'F5':
+        e.preventDefault(); onAction('refresh'); return;
     }
 
     // Sort and nav keys (single letter, case-insensitive)

@@ -333,7 +333,14 @@ export default function CbzViewer({ images, extractionId, darkMode, onPageChange
       case 'fit-width': return { ...base, width: '100%', height: 'auto', objectFit: 'contain' as const };
       case 'fit-height': return { ...base, width: 'auto', height: '100%', objectFit: 'contain' as const };
       case 'fit-page':
-      default: return { ...base, width: 'auto', height: 'auto', maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' as const };
+      default:
+        // width:100% + height:100% + objectFit:contain fills the container in
+        // both axes while preserving aspect ratio. Previously this used
+        // maxWidth/maxHeight which only CONSTRAIN — small images stayed at
+        // intrinsic size and didn't fill, causing the user-visible "Fit
+        // doesn't fully fit" issue on manga pages whose intrinsic resolution
+        // was smaller than the viewer area.
+        return { ...base, width: '100%', height: '100%', objectFit: 'contain' as const };
     }
   };
 

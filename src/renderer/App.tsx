@@ -426,6 +426,42 @@ function usePlaylistState() {
     return { deleted: deleted.size, failed: failed.length };
   }, [reconcileCurrentIndex, addLog]);
 
+  // F5 / Ctrl+R: re-scan the source folder for the current playlist. Picks up
+  // external renames (e.g. user renamed a file via Everything while CBZ Player
+  // was running), additions, and deletions. Preserves the currently-viewed
+  // file's index by looking it up in the new list by full path; if the file
+  // no longer exists (e.g. it was the one renamed), clamps the index to the
+  // nearest valid position and the viewer auto-loads whatever's there.
+  const refreshPlaylist = useCallback(async () => {
+    if (!sortDestination || !window.electronAPI) {
+      addLog('🔄 Refresh: no folder loaded to refresh from', 'text-zinc-500', '🔄');
+      return;
+    }
+    try {
+      const result = await window.electronAPI.loadFolder(sortDestination);
+      const newFiles = result?.files ?? [];
+      setFiles(prev => {
+        const currentFile = prev[currentIndexRef.current];
+        let newIdx = 0;
+        if (currentFile) {
+          const found = newFiles.findIndex(f => f.fullPath === currentFile.fullPath);
+          newIdx = found >= 0
+            ? found
+            : Math.min(currentIndexRef.current, Math.max(0, newFiles.length - 1));
+        }
+        if (newIdx !== currentIndexRef.current) {
+          setCurrentIndex(newIdx);
+          currentIndexRef.current = newIdx;
+        }
+        window.electronAPI?.broadcastState({ files: newFiles, currentIndex: newIdx });
+        return newFiles;
+      });
+      addLog(`🔄 Refreshed playlist: ${newFiles.length} file${newFiles.length === 1 ? '' : 's'}`, 'text-zinc-400', '🔄');
+    } catch (err: any) {
+      addLog(`🔄 Refresh failed: ${err?.message ?? 'unknown error'}`, 'text-red-400', '❌');
+    }
+  }, [sortDestination, addLog]);
+
   const handleRemoveFromPlaylist = useCallback((paths: string[]) => {
     const toRemove = new Set(paths);
     setFiles(prev => {
@@ -607,7 +643,7 @@ function usePlaylistState() {
     renamingIndex, setRenamingIndex, startRenaming, handleRename,
     handleSort, isProcessing,
     lastUndo, handleUndo,
-    handleDeleteFiles, handleRemoveFromPlaylist,
+    handleDeleteFiles, handleRemoveFromPlaylist, refreshPlaylist,
     compareMode, compareFileIndex, comparePickMode, comparePickTwoMode, compareLeftIndex,
     enterAdhocCompare,
     startCompareWithFile, cycleComparePick, cancelComparePick, exitCompare, enterComparePickMode,
@@ -962,6 +998,7 @@ function ViewerWindow() {
     window.electronAPI.onPlaylistAction((action: any) => {
       switch (action.type) {
         case 'navigate': ps.navigate(action.direction); break;
+        case 'refresh': ps.refreshPlaylist(); break;
         case 'jumpTo': {
           ps.jumpTo(action.index);
           // Also trigger extraction in viewer
@@ -1139,6 +1176,7 @@ function ViewerWindow() {
         // Allowed in any mode — mirrors sort, which also works in compare/repack.
         // handleUndo no-ops if there's no snapshot to undo, so this is safe.
         ps.handleUndo(); break;
+      case 'refresh': ps.refreshPlaylist(); break;
       case 'quit': {
         // Gate session log: must have a destination, logs enabled, AND session
         // longer than minLogSessionMinutes. Sessions shorter than the threshold
@@ -1498,6 +1536,7 @@ function PlaylistWindow() {
       case 'prev-file': send({ type: 'navigate', direction: 'back' }); break;
       case 'random-file': send({ type: 'navigate', direction: 'random' }); break;
       case 'rename': send({ type: 'startRenaming' }); break;
+      case 'refresh': send({ type: 'refresh' }); break;
       case 'escape':
         if (state.compareMode) send({ type: 'exitCompare' });
         else if (state.comparePickMode || state.comparePickTwoMode) send({ type: 'cancelComparePick' });

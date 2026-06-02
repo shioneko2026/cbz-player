@@ -116,22 +116,45 @@ export default function CbzViewer({ images, extractionId, darkMode, onPageChange
   // If shifted content right edge > container width, reduce offset.
   const [contentWidth, setContentWidth] = useState(0);
 
+  // Measure the REAL displayed width of the page content. Consumed by the center
+  // offset clamp (below) and the panel-resize limiter (App.handlePanelResize via
+  // window.__cbzViewer.getContentWidth).
+  //
+  // Gotcha: in single-page mode the measured element is the <img> itself. With
+  // fit-page / fit-width its CSS box is forced to 100% width while the visible
+  // picture is letterboxed smaller via object-fit:contain — so offsetWidth reports
+  // the BOX (full area width), not the picture. That made contentWidth == areaWidth,
+  // collapsing the center offset to 0 (Center did nothing in single-page mode).
+  // Fix: compute the contain-fitted width from the image's natural dimensions.
+  // Dual/scroll wrap content in a div that already shrink-wraps, so for those the
+  // child is not an <img> and plain offsetWidth is correct.
+  const measureContentWidth = useCallback(() => {
+    const el = imageAreaRef.current;
+    if (!el) return;
+    const child = el.firstElementChild as HTMLElement | null;
+    if (!child) return;
+    if (child instanceof HTMLImageElement && child.naturalWidth > 0 && child.naturalHeight > 0) {
+      const scale = Math.min(
+        child.offsetWidth / child.naturalWidth,
+        child.offsetHeight / child.naturalHeight,
+      );
+      setContentWidth(child.naturalWidth * scale);
+    } else {
+      setContentWidth(child.offsetWidth);
+    }
+  }, []);
+
   useEffect(() => {
     const el = imageAreaRef.current;
     if (!el) return;
-    const measure = () => {
-      // Find the actual image/wrapper element inside
-      const child = el.firstElementChild as HTMLElement | null;
-      if (child) setContentWidth(child.offsetWidth);
-    };
-    measure();
-    const observer = new MutationObserver(measure);
+    measureContentWidth();
+    const observer = new MutationObserver(measureContentWidth);
     observer.observe(el, { childList: true, subtree: true });
     // Also re-measure on resize
-    const resizeObs = new ResizeObserver(measure);
+    const resizeObs = new ResizeObserver(measureContentWidth);
     resizeObs.observe(el);
     return () => { observer.disconnect(); resizeObs.disconnect(); };
-  }, [images, displayedPage, viewMode]);
+  }, [images, displayedPage, viewMode, measureContentWidth]);
 
   const clampedOffset = (() => {
     if (!centerOffset) return 0;
@@ -404,6 +427,7 @@ export default function CbzViewer({ images, extractionId, darkMode, onPageChange
             style={getImageStyle()}
             draggable={false}
             onError={handleImgError}
+            onLoad={measureContentWidth}
           />
         )}
         {isDual && renderDualPages()}

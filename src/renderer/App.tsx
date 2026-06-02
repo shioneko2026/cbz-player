@@ -1216,7 +1216,10 @@ function ViewerWindow() {
     }
   }, [navigateFile, ps.handleSort, ps.isDocked, ps.paneDark, ps.viewerDark, ps.compareMode, ps.comparePickMode, ps.comparePickTwoMode, panelWidth, playlistVisible, centerPage, repackMode, images.length, ps.shuffleEnabled, ps.enterComparePickMode, ps.randomizePlaylist, ps.minLogSessionMinutes, ps.lastUndo, ps.handleUndo, ps.immerseEnabled, ps.setImmerseEnabled]);
 
-  useHotkeys({ onAction: handleAction, includePageNav: true, disabled: settingsOpen });
+  // includePageNav is off while repacking so the viewer's arrow page-nav doesn't
+  // eat the keys — RepackViewer owns arrow/shift-arrow thumbnail navigation then.
+  // Other hotkeys (sort, undo, quit, immerse) stay live in repack by design.
+  useHotkeys({ onAction: handleAction, includePageNav: !repackMode, disabled: settingsOpen });
 
   const currentFile = ps.files[ps.currentIndex] ?? null;
   // "Left"/"right" files in compare mode. Pick-two and Explorer-launched compare

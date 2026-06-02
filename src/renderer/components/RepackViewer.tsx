@@ -88,23 +88,72 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
   // button for users who want to commit changes without exiting.
   const repackRef = useRef<() => void>(() => {});
 
-  // Keyboard shortcuts
+  // Keyboard shortcuts. While repack mode is active the global viewer page-nav
+  // keys are turned off (App passes includePageNav={!repackMode}), so the arrow
+  // keys below are free for thumbnail navigation. Esc / Delete / Ctrl+A / Ctrl+S
+  // are handled locally here regardless.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // While editing a thumbnail rename, only Escape is meaningful (the rename
+      // input itself stops propagation; this is belt-and-suspenders).
+      if (renamingIndex !== null && e.key !== 'Escape') return;
+
       if (e.key === 'Escape') {
         if (renamingIndex !== null) setRenamingIndex(null);
         else if (selectedIndices.size > 0) setSelectedIndices(new Set());
         else onCancel();
         return;
       }
+
+      // Arrow navigation over the live (non-deleted) thumbnails in visual order.
+      // Plain arrow = move the focus cursor AND make that page the sole selection
+      // (Windows-Explorer style). Shift+arrow = move the cursor and extend the
+      // selection as a contiguous range from the fixed anchor. Up/Down move by one
+      // grid row (= `columns`). previewIndex doubles as the focus cursor.
+      if (e.key === 'ArrowRight' || e.key === 'ArrowLeft' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        if (liveImages.length === 0) return;
+        e.preventDefault();
+        const curPos = Math.max(0, liveImages.findIndex(en => en.index === previewIndex));
+        let newPos = curPos;
+        if (e.key === 'ArrowRight') newPos = curPos + 1;
+        else if (e.key === 'ArrowLeft') newPos = curPos - 1;
+        else if (e.key === 'ArrowDown') newPos = curPos + columns;
+        else newPos = curPos - columns; // ArrowUp
+        newPos = Math.max(0, Math.min(newPos, liveImages.length - 1));
+        const newIndex = liveImages[newPos].index;
+        setPreviewIndex(newIndex);
+        if (e.shiftKey) {
+          // Extend a contiguous range from the anchor to the new cursor (replace).
+          const anchorIdx = lastClickIndex.current ?? newIndex;
+          const anchorPos = Math.max(0, liveImages.findIndex(en => en.index === anchorIdx));
+          const start = Math.min(anchorPos, newPos);
+          const end = Math.max(anchorPos, newPos);
+          setSelectedIndices(new Set(liveImages.slice(start, end + 1).map(en => en.index)));
+          // anchor stays fixed during shift-extend
+        } else {
+          setSelectedIndices(new Set([newIndex]));
+          lastClickIndex.current = newIndex;
+        }
+        return;
+      }
+
       // F2 is reserved for renaming the CBZ file in the playlist — not used here
       if (e.key === 'Delete' && selectedIndices.size > 0) {
+        const toDelete = selectedIndices;
+        // Land the focus cursor on the nearest surviving page after the reflow.
+        const delPos = liveImages.findIndex(en => toDelete.has(en.index));
+        const survivors = liveImages.filter(en => !toDelete.has(en.index));
         setDeletedIndices(prev => {
           const next = new Set(prev);
-          selectedIndices.forEach(i => next.add(i));
+          toDelete.forEach(i => next.add(i));
           return next;
         });
         setSelectedIndices(new Set());
+        if (survivors.length > 0) {
+          const np = Math.max(0, Math.min(delPos, survivors.length - 1));
+          setPreviewIndex(survivors[np].index);
+          lastClickIndex.current = survivors[np].index;
+        }
         return;
       }
       if (e.key === 'a' && (e.ctrlKey || e.metaKey)) {
@@ -116,10 +165,7 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
       // Same as clicking the blue "Repack & Save" button at the bottom. The
       // separate "Save" button (save-in-place, stays in repack) remains for
       // users who want to commit without exiting. preventDefault blocks the
-      // browser's "save page" prompt. stopPropagation + the local listener
-      // keep this from colliding with the global useHotkeys dispatcher.
-      // Explicitly NOT shift or alt — those combos mean toggle-shuffle and
-      // randomize-playlist globally.
+      // browser's "save page" prompt; stopPropagation is kept defensively.
       if (e.key.toLowerCase() === 's' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
         e.preventDefault();
         e.stopPropagation();
@@ -129,7 +175,15 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [selectedIndices, renamingIndex, liveImages, onCancel]);
+  }, [selectedIndices, renamingIndex, liveImages, onCancel, previewIndex, columns]);
+
+  // Keep the focused thumbnail scrolled into view as the cursor moves (arrow nav
+  // or click). Uses previewIndex as the cursor.
+  useEffect(() => {
+    const panel = document.querySelector('[data-repack-panel]');
+    const el = panel?.querySelector(`[data-thumb-index="${previewIndex}"]`) as HTMLElement | null;
+    el?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [previewIndex]);
 
   const handleThumbnailClick = useCallback((index: number, e: React.MouseEvent) => {
     setPreviewIndex(index);
@@ -285,7 +339,9 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
               return (
                 <div
                   key={index}
+                  data-thumb-index={index}
                   className={`rounded overflow-hidden cursor-pointer transition-all ${isSelected ? selectedBg : `hover:ring-1 ${darkMode ? 'hover:ring-zinc-600' : 'hover:ring-zinc-400'}`}`}
+                  style={index === previewIndex ? { outline: '2px solid #fbbf24', outlineOffset: '1px' } : undefined}
                   onClick={(e) => handleThumbnailClick(index, e)}
                   onContextMenu={(e) => handleContextMenu(e, index)}
                 >

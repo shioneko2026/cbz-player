@@ -103,8 +103,8 @@ export default function CompareViewer(props: CompareViewerProps) {
 
   // Toggling sync ON captures the current offset (rightPage - leftPage) so the
   // user's manual alignment is preserved. Toggling sync OFF doesn't reset the
-  // offset — it just stops applying it during navigation. Used by both the
-  // Ctrl+I keyboard shortcut and the on-screen sync button.
+  // offset — it just stops applying it during navigation. Used by the middle-click
+  // handler (container onMouseDown) and the on-screen sync button.
   const toggleSync = useCallback(() => {
     setSynced(prev => {
       const next = !prev;
@@ -118,9 +118,8 @@ export default function CompareViewer(props: CompareViewerProps) {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { onExit?.(); return; }
       // F11 handled by Electron menu bar accelerator — don't duplicate here
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'i') {
-        e.preventDefault(); toggleSync(); return;
-      }
+      // Sync toggle moved to MIDDLE-CLICK (see the container's onMouseDown). Ctrl+I
+      // is now the global Immerse toggle, so it must NOT be captured here anymore.
       // Ctrl+F cycles fit mode: Fit → Height → Width → Fit. Same behavior as
       // the main CbzViewer; local to this component because fitMode is local.
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') {
@@ -256,6 +255,7 @@ export default function CompareViewer(props: CompareViewerProps) {
       ref={containerRef}
       className={`h-full w-full ${bg} flex flex-col relative select-none`}
       onMouseMove={handleMouseMove}
+      onMouseDown={(e) => { if (e.button === 1) { e.preventDefault(); toggleSync(); } }}
     >
       {/* Two-pane view */}
       <div className="flex-1 flex min-h-0">
@@ -275,7 +275,7 @@ export default function CompareViewer(props: CompareViewerProps) {
         {/* Controls row */}
         <div className="flex items-center justify-center gap-4 px-4 py-1.5">
           <button onClick={onSwap} className={btnBase} title="Swap sides">⇄ Swap</button>
-          <button onClick={toggleSync} className={`${btnBase} ${synced ? btnActive : ''}`} title="Sync page navigation">
+          <button onClick={toggleSync} className={`${btnBase} ${synced ? btnActive : ''}`} title="Sync page navigation (middle-click anywhere)">
             {synced ? '🔗 Synced' : '🔓 Independent'}
           </button>
           <div className="flex gap-1">

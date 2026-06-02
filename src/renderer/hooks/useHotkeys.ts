@@ -9,7 +9,7 @@ export type HotkeyAction =
   | 'next-page' | 'prev-page' | 'first-page' | 'last-page'
   // App
   | 'fullscreen' | 'quit' | 'clear-log' | 'refresh'
-  | 'toggle-playlist' | 'toggle-center'
+  | 'toggle-playlist' | 'toggle-center' | 'toggle-immerse'
   | 'view-single' | 'view-dual-ltr' | 'view-dual-rtl' | 'view-scroll'
   | 'rename' | 'escape'
   // Mode switches + playlist operations (session 9)
@@ -44,7 +44,6 @@ export function useHotkeys({ onAction, includePageNav = false, disabled = false 
       switch (key.toLowerCase()) {
         case 'c': e.preventDefault(); onAction('enter-compare'); return;
         case 'r': e.preventDefault(); onAction('enter-repack'); return;
-        case 's': e.preventDefault(); onAction('toggle-shuffle'); return;
       }
       return;
     }
@@ -61,7 +60,8 @@ export function useHotkeys({ onAction, includePageNav = false, disabled = false 
     if (ctrl && !shift && !alt) {
       switch (key.toLowerCase()) {
         case 'q': e.preventDefault(); onAction('quit'); return;
-        case 'r': e.preventDefault(); onAction('refresh'); return;
+        case 'r': e.preventDefault(); onAction('toggle-shuffle'); return;
+        case 'i': e.preventDefault(); onAction('toggle-immerse'); return;
         case 'e': e.preventDefault(); onAction('toggle-center'); return;
         case 'z': e.preventDefault(); onAction('undo'); return;
         case '1': e.preventDefault(); onAction('view-single'); return;
@@ -119,9 +119,10 @@ export function useHotkeys({ onAction, includePageNav = false, disabled = false 
       case ']':
       case '\\':
         e.preventDefault(); onAction('next-file'); return;
-      // F5 refreshes the playlist from the source folder. Lives in both-windows
-      // section so it works from either the viewer or detached playlist (the
-      // detached playlist routes it to the viewer via the message bus).
+      // F5 refreshes the playlist from the source folder. This is now the ONLY
+      // refresh key — Ctrl+R was reassigned to toggle-shuffle. Lives in the
+      // both-windows section so it works from either the viewer or detached
+      // playlist (the detached playlist routes it to the viewer via the message bus).
       case 'F5':
         e.preventDefault(); onAction('refresh'); return;
     }

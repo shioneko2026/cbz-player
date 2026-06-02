@@ -1138,6 +1138,12 @@ function ViewerWindow() {
       case 'fullscreen': window.electronAPI?.toggleFullscreen(); break;
       case 'toggle-playlist': if (ps.isDocked) setPlaylistVisible(v => !v); break;
       case 'toggle-center': if (showDockedPanel) setCenterPage(c => !c); break;
+      // Ctrl+I — toggle Immerse. Docked-only (matches the panel toggle + immerse's
+      // mutual exclusivity with detached). Suppressed in compare/repack so it
+      // doesn't fire while those modes own the screen/keyboard.
+      case 'toggle-immerse':
+        if (ps.isDocked && !ps.compareMode && !repackMode) ps.setImmerseEnabled(!ps.immerseEnabled);
+        break;
       case 'rename': ps.startRenaming(); break;
       case 'escape':
         if (ps.compareMode) ps.exitCompare();
@@ -1208,7 +1214,7 @@ function ViewerWindow() {
         break;
       }
     }
-  }, [navigateFile, ps.handleSort, ps.isDocked, ps.paneDark, ps.viewerDark, ps.compareMode, ps.comparePickMode, ps.comparePickTwoMode, panelWidth, playlistVisible, centerPage, repackMode, images.length, ps.shuffleEnabled, ps.enterComparePickMode, ps.randomizePlaylist, ps.minLogSessionMinutes, ps.lastUndo, ps.handleUndo]);
+  }, [navigateFile, ps.handleSort, ps.isDocked, ps.paneDark, ps.viewerDark, ps.compareMode, ps.comparePickMode, ps.comparePickTwoMode, panelWidth, playlistVisible, centerPage, repackMode, images.length, ps.shuffleEnabled, ps.enterComparePickMode, ps.randomizePlaylist, ps.minLogSessionMinutes, ps.lastUndo, ps.handleUndo, ps.immerseEnabled, ps.setImmerseEnabled]);
 
   useHotkeys({ onAction: handleAction, includePageNav: true, disabled: settingsOpen });
 

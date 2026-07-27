@@ -41,7 +41,21 @@
   DeleteRegKey HKCU "Software\Classes\${PROGID}\shell\addtoplaylist"
   DeleteRegKey HKCU "Software\Classes\${PROGID}\shell\repack"
 
-  ; ── Verb 1: "Compare 2 in CBZ Player" on .cbz ───────────────────────────
+  ; Migration: session 13 renamed the four .cbz verb subkeys with numeric
+  ; prefixes (01compare / 02repack / 03addtoplaylist / 04openfolder) to force
+  ; their order in the context menu. Windows sorts static verbs alphabetically
+  ; by SUBKEY NAME, so the prefix controls order while the visible label is
+  ; unchanged. Delete the old un-prefixed subkeys first so an over-install
+  ; doesn't leave BOTH the old and new verbs (each entry would appear twice).
+  DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\compare"
+  DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\addtoplaylist"
+  DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\repack"
+  DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\openfolder"
+
+  ; Desired context-menu order (top→bottom): Compare, Repack, Add to Playlist,
+  ; Open this folder. Achieved via the 01–04 subkey-name prefixes below.
+
+  ; ── Verb 1 (order 01): "Compare 2 in CBZ Player" on .cbz ────────────────
   ; Shows on right-click of any .cbz REGARDLESS of which app is the default
   ; .cbz handler. SystemFileAssociations is Windows' documented additive-
   ; verb mechanism that doesn't disrupt whatever else is registered.
@@ -54,9 +68,9 @@
   ;
   ; NOTE: ${APP_EXECUTABLE_FILENAME} already INCLUDES the .exe extension.
   ; Appending another .exe produces "CBZ Player.exe.exe" which doesn't exist.
-  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\compare" "" "Compare 2 in CBZ Player"
-  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\compare" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
-  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\compare\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --compare "%1"'
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\01compare" "" "Compare 2 in CBZ Player"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\01compare" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\01compare\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --compare "%1"'
 
   ; ── Verb 2: "Add to CBZ Player Playlist" on .cbz ────────────────────────
   ; Shows on right-click of any .cbz REGARDLESS of default handler. Always
@@ -64,18 +78,18 @@
   ; running). Useful when the user wants to explicitly add files to an
   ; existing playlist instead of letting the default Open verb decide
   ; replace-vs-append based on count.
-  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\addtoplaylist" "" "Add to CBZ Player Playlist"
-  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\addtoplaylist" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
-  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\addtoplaylist\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --append "%1"'
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\03addtoplaylist" "" "Add to CBZ Player Playlist"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\03addtoplaylist" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\03addtoplaylist\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --append "%1"'
 
   ; ── Verb 3a: "Repack this CBZ" on .cbz files ────────────────────────────
   ; Shows on right-click of any .cbz REGARDLESS of default handler. Loads
   ; the file into the playlist, extracts, and enters repack mode
   ; automatically once extraction completes. Single-file operation — if
   ; user multi-selects, only the first is taken.
-  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\repack" "" "Repack this CBZ"
-  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\repack" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
-  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\repack\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --repack "%1"'
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\02repack" "" "Repack this CBZ"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\02repack" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\02repack\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --repack "%1"'
 
   ; ── Verb 3b: "Repack with CBZ Player" on non-.cbz archive types ─────────
   ; Same Repack verb, added to .zip / .rar / .7z via SystemFileAssociations
@@ -108,15 +122,31 @@
   WriteRegStr HKCU "Software\Classes\Directory\Background\shell\OpenInCbzPlayer" "" "Open this folder in CBZ Player"
   WriteRegStr HKCU "Software\Classes\Directory\Background\shell\OpenInCbzPlayer" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
   WriteRegStr HKCU "Software\Classes\Directory\Background\shell\OpenInCbzPlayer\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --folder "%V"'
+
+  ; ── Verb 5: "Open this folder in CBZ Player" on .cbz FILES ───────────────
+  ; File-context counterpart to Verb 4. Right-clicking a .cbz opens its
+  ; CONTAINING folder as a fresh playlist (all supported archives in the
+  ; folder, starting at the first). %1 is the FILE, so the app resolves the
+  ; parent directory itself via the --folder-of flag. Lives under
+  ; SystemFileAssociations\.cbz so it appears regardless of the default handler.
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\04openfolder" "" "Open this folder in CBZ Player"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\04openfolder" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\04openfolder\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --folder-of "%1"'
 !macroend
 
 !macro customUnInstall
   ; Remove all custom verb registry entries we created. The default Open verb
   ; on .cbz (and the .cbz association itself) are removed by electron-builder's
   ; own uninstall logic based on the fileAssociations config.
+  DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\01compare"
+  DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\02repack"
+  DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\03addtoplaylist"
+  DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\04openfolder"
+  ; Belt-and-suspenders: also remove the pre-session-13 un-prefixed subkeys.
   DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\compare"
   DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\addtoplaylist"
   DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\repack"
+  DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\openfolder"
   DeleteRegKey HKCU "Software\Classes\Directory\shell\OpenInCbzPlayer"
   DeleteRegKey HKCU "Software\Classes\Directory\Background\shell\OpenInCbzPlayer"
   DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.zip\shell\repack"

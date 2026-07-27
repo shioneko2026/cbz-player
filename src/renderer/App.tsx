@@ -1,8 +1,9 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { FileInfo } from './lib/types';
-import { useNavigation } from './hooks/useNavigation';
+import { useNavigation, pickNextIndex } from './hooks/useNavigation';
 import { useHotkeys, HotkeyAction } from './hooks/useHotkeys';
 import CbzViewer from './components/CbzViewer';
+import ShortcutsOverlay from './components/ShortcutsOverlay';
 import CompareViewer from './components/CompareViewer';
 import RepackViewer from './components/RepackViewer';
 import PlaylistPanel from './components/PlaylistPanel';
@@ -161,6 +162,11 @@ function usePlaylistState() {
   const [shuffleEnabled, setShuffleEnabled] = useState(false);
   const [skipViewedEnabled, setSkipViewedEnabled] = useState(false);
   const [writeLogsEnabled, setWriteLogsEnabled] = useState(false);
+  // Double-tap SPACE = Keep. Persisted (see loadConfig below + the app:quit
+  // uiState payload), so the toggle remembers its state across launches.
+  const [doubleSpaceKeeps, setDoubleSpaceKeeps] = useState(true);
+  // Max gap (ms) between the two SPACE taps to count as double-tap-to-Keep. Tunable in Settings.
+  const [doubleSpaceMs, setDoubleSpaceMs] = useState(200);
   const [minLogSessionMinutes, setMinLogSessionMinutes] = useState(5);
   const [globalHotkeys, setGlobalHotkeys] = useState(false);
   const [viewedPaths, setViewedPaths] = useState<Set<string>>(new Set());
@@ -202,6 +208,8 @@ function usePlaylistState() {
       if (cfg.isDocked !== undefined) setIsDocked(cfg.isDocked);
       if (cfg.categories?.length > 0) setCategories(cfg.categories);
       if (cfg.writeLogsEnabled !== undefined) setWriteLogsEnabled(cfg.writeLogsEnabled);
+      if (cfg.doubleSpaceKeeps !== undefined) setDoubleSpaceKeeps(cfg.doubleSpaceKeeps);
+      if (cfg.doubleSpaceMs !== undefined) setDoubleSpaceMs(cfg.doubleSpaceMs);
       if (cfg.minLogSessionMinutes !== undefined) setMinLogSessionMinutes(cfg.minLogSessionMinutes);
       setConfigLoaded(true);
     });
@@ -650,6 +658,8 @@ function usePlaylistState() {
     randomizePlaylist,
     categories, setCategories,
     writeLogsEnabled, setWriteLogsEnabled,
+    doubleSpaceKeeps, setDoubleSpaceKeeps,
+    doubleSpaceMs, setDoubleSpaceMs,
     minLogSessionMinutes, setMinLogSessionMinutes,
     stats, logEntries, sessionStartTime, addLog, incrementStat, clearLog,
     navigate, jumpTo, handleViewerTheme, handleToggleDocked,
@@ -818,14 +828,35 @@ function ViewerWindow() {
     filesRef.current = patch(filesRef.current);
   }, []);
 
+  // Mirror Shuffle / Skip-Viewed state into refs so navigateFile can read the
+  // LIVE values without taking them as deps. viewedPaths changes on every
+  // navigation, so depending on it directly would re-create navigateFile (and
+  // therefore re-subscribe the global hotkey listener) on every single file move.
+  const shuffleRef = useRef(ps.shuffleEnabled);
+  const skipViewedRef = useRef(ps.skipViewedEnabled);
+  const viewedPathsRef = useRef(ps.viewedPaths);
+  useEffect(() => { shuffleRef.current = ps.shuffleEnabled; }, [ps.shuffleEnabled]);
+  useEffect(() => { skipViewedRef.current = ps.skipViewedEnabled; }, [ps.skipViewedEnabled]);
+  useEffect(() => { viewedPathsRef.current = ps.viewedPaths; }, [ps.viewedPaths]);
+
   const navigateFile = useCallback((direction: 'next' | 'prev' | 'random') => {
     const f = filesRef.current;
-    const idx = indexRef.current;
     if (f.length === 0) return;
-    let newIdx: number;
-    if (direction === 'random') newIdx = Math.floor(Math.random() * f.length);
-    else if (direction === 'next') newIdx = idx + 1 < f.length ? idx + 1 : 0;
-    else newIdx = idx > 0 ? idx - 1 : f.length - 1;
+    // Shared with useNavigation's `navigate` so Shuffle and Skip-Viewed behave
+    // identically whether you navigate from the viewer or the detached playlist.
+    // This used to be a separate copy that ignored both toggles — which is why
+    // Shuffle appeared to do nothing when navigating from the viewer.
+    const picked = pickNextIndex({
+      action: direction === 'prev' ? 'back' : direction,
+      files: f,
+      currentIndex: indexRef.current,
+      shuffleEnabled: shuffleRef.current,
+      skipViewedEnabled: skipViewedRef.current,
+      viewedPaths: viewedPathsRef.current,
+      resetViewed: () => ps.setViewedPaths(new Set()),
+    });
+    if (picked === null) return;
+    const newIdx = picked;
     ps.setCurrentIndex(newIdx);
     indexRef.current = newIdx;
     // Mark as viewed
@@ -871,6 +902,10 @@ function ViewerWindow() {
   const [controlsHideDelay, setControlsHideDelay] = useState(1500);
   const [controlBarMode, setControlBarMode] = useState<'auto-hide' | 'hover-only' | 'always-visible'>('auto-hide');
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // F1 cheat-sheet overlay. While it's open we disable the global hotkey
+  // dispatcher (below) so a stray sort key can't fire at the cheat-sheet —
+  // which is why ShortcutsOverlay handles its own F1/Esc close.
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [repackMode, setRepackMode] = useState(false);
   // Path of a file the user invoked Explorer's "Repack this CBZ" verb on,
   // waiting for its extraction to complete. Once `images.length > 0` and the
@@ -1173,15 +1208,17 @@ function ViewerWindow() {
         // we're not already mid-compare. No-op if already in repack mode.
         if (!repackMode && !ps.compareMode && images.length > 0) setRepackMode(true);
         break;
+      case 'toggle-shortcuts': setShortcutsOpen(v => !v); break;
       case 'toggle-shuffle': ps.setShuffleEnabled(!ps.shuffleEnabled); break;
       case 'randomize-playlist': ps.randomizePlaylist(); break;
       case 'keep': case 'purge': case 'fix': case 'translate':
       case 'inquire': case 'unreadable':
         ps.handleSort(action); break;
       case 'undo':
-        // Allowed in any mode — mirrors sort, which also works in compare/repack.
-        // handleUndo no-ops if there's no snapshot to undo, so this is safe.
-        ps.handleUndo(); break;
+        // In repack, Ctrl+Z is owned by RepackViewer (undo the last page delete),
+        // so the global sort-undo must stand down there. Still active in compare
+        // and normal viewing; handleUndo no-ops when there's no snapshot.
+        if (!repackMode) ps.handleUndo(); break;
       case 'refresh': ps.refreshPlaylist(); break;
       case 'quit': {
         // Gate session log: must have a destination, logs enabled, AND session
@@ -1203,6 +1240,8 @@ function ViewerWindow() {
           isDocked: ps.isDocked, dockedPanelWidth: panelWidth,
           playlistVisible, centerPage,
           writeLogsEnabled: ps.writeLogsEnabled,
+          doubleSpaceKeeps: ps.doubleSpaceKeeps,
+          doubleSpaceMs: ps.doubleSpaceMs,
           sessionLog: (ps.sortDestination && ps.writeLogsEnabled && meetsMinDuration) ? {
             sortDestination: ps.sortDestination,
             startTime: ps.sessionStartTime,
@@ -1219,7 +1258,7 @@ function ViewerWindow() {
   // includePageNav is off while repacking so the viewer's arrow page-nav doesn't
   // eat the keys — RepackViewer owns arrow/shift-arrow thumbnail navigation then.
   // Other hotkeys (sort, undo, quit, immerse) stay live in repack by design.
-  useHotkeys({ onAction: handleAction, includePageNav: !repackMode, disabled: settingsOpen });
+  useHotkeys({ onAction: handleAction, includePageNav: !repackMode, disabled: settingsOpen || shortcutsOpen, doubleSpaceKeeps: ps.doubleSpaceKeeps, doubleSpaceMs: ps.doubleSpaceMs });
 
   const currentFile = ps.files[ps.currentIndex] ?? null;
   // "Left"/"right" files in compare mode. Pick-two and Explorer-launched compare
@@ -1426,6 +1465,8 @@ function ViewerWindow() {
               onSetShuffle={ps.setShuffleEnabled}
               onSetSkipViewed={ps.setSkipViewedEnabled}
               writeLogsEnabled={ps.writeLogsEnabled}
+              doubleSpaceKeeps={ps.doubleSpaceKeeps}
+              onSetDoubleSpaceKeeps={ps.setDoubleSpaceKeeps}
               onSetWriteLogs={ps.setWriteLogsEnabled}
               onSetGlobalHotkeys={ps.setGlobalHotkeys}
               onSetPaneDark={ps.setPaneDark}
@@ -1469,6 +1510,15 @@ function ViewerWindow() {
         </div>
       )}
 
+      {/* F1 shortcut cheat-sheet */}
+      {shortcutsOpen && (
+        <ShortcutsOverlay
+          darkMode={darkMode}
+          categories={ps.categories}
+          onClose={() => setShortcutsOpen(false)}
+        />
+      )}
+
       {/* Settings Modal */}
       <SettingsModal
         isOpen={settingsOpen}
@@ -1485,6 +1535,8 @@ function ViewerWindow() {
             if (cfg.repackThumbnailSize) setRepackThumbnailSize(cfg.repackThumbnailSize);
             if (cfg.repackPanelWidth) setRepackPanelWidth(cfg.repackPanelWidth);
             if (cfg.minLogSessionMinutes !== undefined) ps.setMinLogSessionMinutes(cfg.minLogSessionMinutes);
+            if (cfg.doubleSpaceKeeps !== undefined) ps.setDoubleSpaceKeeps(cfg.doubleSpaceKeeps);
+            if (cfg.doubleSpaceMs !== undefined) ps.setDoubleSpaceMs(cfg.doubleSpaceMs);
             (window as any).__cbzSettings = {
               beepOnLastPage: cfg.beepOnLastPage ?? true,
               beepVolume: cfg.beepVolume ?? 0.15,

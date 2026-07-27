@@ -330,6 +330,15 @@ export function cleanupTemp(): void {
   }
 }
 
+/**
+ * Lightweight debug snapshot for the main-process memory logger: how many
+ * extraction slots are currently live (should stay ~1-2 in normal use) and the
+ * total number of extractions performed this session (detects runaway re-extraction).
+ */
+export function getSlotDebugInfo(): { slotCount: number; extractionCounter: number } {
+  return { slotCount: slotData.size, extractionCounter };
+}
+
 function collectImages(dir: string, baseDir: string, results: { relativePath: string; fullPath: string }[]): void {
   let entries: fs.Dirent[];
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }

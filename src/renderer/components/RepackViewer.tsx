@@ -56,10 +56,20 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
   const [folderName, setFolderName] = useState<string>(initialFolderName);
   const [editableFileName, setEditableFileName] = useState<string>(fileName);
   const renameInputRef = useRef<HTMLInputElement>(null);
+  // Range-selection anchor (an image index). Shift+click / Shift+arrow extend a
+  // contiguous selection from this anchor to the cursor. Seeded to the first page
+  // on entry (in the reset effect) so Shift+arrow works immediately, without
+  // needing a priming plain-arrow press first.
+  const lastClickIndex = useRef<number | null>(null);
+  // Undo stack for page deletes, oldest first. Each entry is the list of image
+  // indices removed by one delete action; Ctrl+Z pops the top and restores them.
+  const [deleteHistory, setDeleteHistory] = useState<number[][]>([]);
 
   // Reset editing state when file changes, but keep panel width
   useEffect(() => {
-    setSelectedIndices(new Set());
+    // Start with page 0 selected (red) and as the active/preview page, so arrows
+    // and Shift+arrow work immediately from a known spot — Windows-Explorer style.
+    setSelectedIndices(new Set([0]));
     setDeletedIndices(new Set());
     setPreviewIndex(0);
     setRenames({});
@@ -67,8 +77,11 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
     setContextMenu(null);
     setFolderName(initialFolderName);
     setEditableFileName(fileName);
+    setDeleteHistory([]);
+    // Seed the range anchor at page 0 too, so the first Shift+arrow extends from
+    // the start instead of collapsing to a single page.
+    lastClickIndex.current = 0;
   }, [extractionId, initialFolderName, fileName]);
-  const lastClickIndex = useRef<number | null>(null);
 
   const liveImages = images.map((img, i) => ({ original: img, index: i })).filter(e => !deletedIndices.has(e.index));
 
@@ -79,6 +92,47 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
     window.addEventListener('click', handler);
     return () => window.removeEventListener('click', handler);
   }, [contextMenu]);
+
+  // Delete the given pages: record the batch on the undo stack, drop them from
+  // the live set, clear the selection, and land the focus cursor on the nearest
+  // surviving page. Shared by the Delete key, the Delete button, and the
+  // context-menu Delete so Ctrl+Z can reverse any of them.
+  const deletePages = useCallback((indices: number[]) => {
+    if (indices.length === 0) return;
+    const toDelete = new Set(indices);
+    const delPos = liveImages.findIndex(en => toDelete.has(en.index));
+    const survivors = liveImages.filter(en => !toDelete.has(en.index));
+    setDeletedIndices(prev => {
+      const next = new Set(prev);
+      indices.forEach(i => next.add(i));
+      return next;
+    });
+    setDeleteHistory(prev => [...prev, indices]);
+    setSelectedIndices(new Set());
+    if (survivors.length > 0) {
+      const np = Math.max(0, Math.min(delPos, survivors.length - 1));
+      setPreviewIndex(survivors[np].index);
+      lastClickIndex.current = survivors[np].index;
+    }
+  }, [liveImages]);
+
+  // Ctrl+Z: restore the most recent delete batch (multi-level). Setters are kept
+  // un-nested — React Strict Mode double-invokes updater callbacks, so nesting
+  // one setState inside another's updater would fire it twice.
+  const undoDelete = useCallback(() => {
+    if (deleteHistory.length === 0) return;
+    const restored = deleteHistory[deleteHistory.length - 1];
+    setDeleteHistory(prev => prev.slice(0, -1));
+    setDeletedIndices(prev => {
+      const next = new Set(prev);
+      restored.forEach(i => next.delete(i));
+      return next;
+    });
+    if (restored.length > 0) {
+      setPreviewIndex(restored[0]);
+      lastClickIndex.current = restored[0];
+    }
+  }, [deleteHistory]);
 
   // Ref forwarded to handleRepack once it's defined below. Declared up here so
   // the keydown effect can reference it without TDZ concerns. Ctrl+S triggers
@@ -106,10 +160,10 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
       }
 
       // Arrow navigation over the live (non-deleted) thumbnails in visual order.
-      // Plain arrow = move the focus cursor AND make that page the sole selection
-      // (Windows-Explorer style). Shift+arrow = move the cursor and extend the
-      // selection as a contiguous range from the fixed anchor. Up/Down move by one
-      // grid row (= `columns`). previewIndex doubles as the focus cursor.
+      // Plain arrow = move the single red selection by one (Windows-Explorer style);
+      // the preview follows. Shift+arrow = extend a contiguous selection from the
+      // fixed anchor. Up/Down move by one grid row (= `columns`). previewIndex tracks
+      // the active page (drives the preview pane); the red highlight is the selection.
       if (e.key === 'ArrowRight' || e.key === 'ArrowLeft' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
         if (liveImages.length === 0) return;
         e.preventDefault();
@@ -123,7 +177,8 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
         const newIndex = liveImages[newPos].index;
         setPreviewIndex(newIndex);
         if (e.shiftKey) {
-          // Extend a contiguous range from the anchor to the new cursor (replace).
+          // Shift+arrow: extend a contiguous range from the fixed anchor to the
+          // new cursor (replaces the current selection).
           const anchorIdx = lastClickIndex.current ?? newIndex;
           const anchorPos = Math.max(0, liveImages.findIndex(en => en.index === anchorIdx));
           const start = Math.min(anchorPos, newPos);
@@ -131,29 +186,30 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
           setSelectedIndices(new Set(liveImages.slice(start, end + 1).map(en => en.index)));
           // anchor stays fixed during shift-extend
         } else {
+          // Plain arrow: move the single red selection to the new page (Explorer
+          // single-select), and drop the anchor here for a following Shift+arrow.
           setSelectedIndices(new Set([newIndex]));
           lastClickIndex.current = newIndex;
         }
         return;
       }
 
-      // F2 is reserved for renaming the CBZ file in the playlist — not used here
-      if (e.key === 'Delete' && selectedIndices.size > 0) {
-        const toDelete = selectedIndices;
-        // Land the focus cursor on the nearest surviving page after the reflow.
-        const delPos = liveImages.findIndex(en => toDelete.has(en.index));
-        const survivors = liveImages.filter(en => !toDelete.has(en.index));
-        setDeletedIndices(prev => {
-          const next = new Set(prev);
-          toDelete.forEach(i => next.add(i));
-          return next;
-        });
-        setSelectedIndices(new Set());
-        if (survivors.length > 0) {
-          const np = Math.max(0, Math.min(delPos, survivors.length - 1));
-          setPreviewIndex(survivors[np].index);
-          lastClickIndex.current = survivors[np].index;
-        }
+      // F2 is reserved for renaming the CBZ file in the playlist — not used here.
+      // Delete removes the selected pages, or — when nothing is selected — the
+      // page under the cursor (plain arrows no longer select, so this keeps
+      // single-page keyboard deletes working). deletePages records the undo step.
+      if (e.key === 'Delete') {
+        e.preventDefault();
+        if (selectedIndices.size > 0) deletePages([...selectedIndices]);
+        else if (liveImages.some(en => en.index === previewIndex)) deletePages([previewIndex]);
+        return;
+      }
+      // Ctrl+Z: undo the most recent page delete (multi-level). While in repack
+      // this shadows the app's global sort-undo, which App suppresses when
+      // repackMode is active so the two can't both fire.
+      if (e.key.toLowerCase() === 'z' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        undoDelete();
         return;
       }
       if (e.key === 'a' && (e.ctrlKey || e.metaKey)) {
@@ -175,7 +231,7 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [selectedIndices, renamingIndex, liveImages, onCancel, previewIndex, columns]);
+  }, [selectedIndices, renamingIndex, liveImages, onCancel, previewIndex, columns, deletePages, undoDelete]);
 
   // Keep the focused thumbnail scrolled into view as the cursor moves (arrow nav
   // or click). Uses previewIndex as the cursor.
@@ -189,23 +245,31 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
     setPreviewIndex(index);
 
     if (e.shiftKey && lastClickIndex.current !== null) {
-      const start = Math.min(lastClickIndex.current, index);
-      const end = Math.max(lastClickIndex.current, index);
-      const liveIndices = liveImages.map(e => e.index);
-      setSelectedIndices(prev => {
-        const next = new Set(prev);
-        liveIndices.forEach(i => { if (i >= start && i <= end) next.add(i); });
-        return next;
-      });
-    } else {
-      // Normal click — toggle selection
+      // Shift+click: select the contiguous range from the anchor to here, by
+      // position in the live (non-deleted) order. Replaces the selection; the
+      // anchor stays put so repeated Shift+clicks re-extend from the same origin.
+      const liveOrder = liveImages.map(en => en.index);
+      const anchorPos = liveOrder.indexOf(lastClickIndex.current);
+      const clickPos = liveOrder.indexOf(index);
+      if (anchorPos !== -1 && clickPos !== -1) {
+        const start = Math.min(anchorPos, clickPos);
+        const end = Math.max(anchorPos, clickPos);
+        setSelectedIndices(new Set(liveOrder.slice(start, end + 1)));
+      }
+    } else if (e.ctrlKey || e.metaKey) {
+      // Ctrl+click: toggle this page in/out of the selection; move the anchor.
       setSelectedIndices(prev => {
         const next = new Set(prev);
         if (next.has(index)) next.delete(index); else next.add(index);
         return next;
       });
+      lastClickIndex.current = index;
+    } else {
+      // Plain click: select just this page (Explorer single-click — replaces any
+      // existing selection), and set the anchor for a following Shift+click.
+      setSelectedIndices(new Set([index]));
+      lastClickIndex.current = index;
     }
-    lastClickIndex.current = index;
   }, [liveImages]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, index: number) => {
@@ -215,13 +279,8 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
   }, []);
 
   const handleDeleteSelected = useCallback(() => {
-    setDeletedIndices(prev => {
-      const next = new Set(prev);
-      selectedIndices.forEach(i => next.add(i));
-      return next;
-    });
-    setSelectedIndices(new Set());
-  }, [selectedIndices]);
+    deletePages([...selectedIndices]);
+  }, [selectedIndices, deletePages]);
 
   const selectFirstHalf = useCallback(() => {
     const half = Math.floor(liveImages.length / 2);
@@ -274,7 +333,7 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
   const border = darkMode ? 'border-zinc-800' : 'border-zinc-300';
   const text = darkMode ? 'text-zinc-300' : 'text-zinc-700';
   const subtext = darkMode ? 'text-zinc-500' : 'text-zinc-500';
-  const selectedBg = darkMode ? 'ring-3 ring-blue-400 bg-blue-700/40 shadow-[0_0_12px_rgba(59,130,246,0.5)]' : 'ring-3 ring-blue-500 bg-blue-200/60 shadow-[0_0_12px_rgba(59,130,246,0.4)]';
+  const selectedBg = darkMode ? 'ring-2 ring-red-500 bg-red-700/40 shadow-[0_0_12px_rgba(239,68,68,0.55)]' : 'ring-2 ring-red-500 bg-red-200/60 shadow-[0_0_12px_rgba(239,68,68,0.45)]';
   const btnBase = `px-3 py-1.5 rounded text-sm transition-colors whitespace-nowrap`;
 
   const previewImg = images[previewIndex];
@@ -323,7 +382,7 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
         <div className="flex items-center gap-2 whitespace-nowrap">
           <span className={`text-xs ${subtext}`}>{liveImages.length}/{images.length} pages</span>
           {selectedIndices.size > 0 && (
-            <span className={`text-xs ${darkMode ? 'text-blue-400' : 'text-blue-600'}`}>{selectedIndices.size} selected</span>
+            <span className={`text-xs font-semibold ${darkMode ? 'text-red-400' : 'text-red-600'}`}>{selectedIndices.size} selected</span>
           )}
         </div>
       </div>
@@ -341,7 +400,6 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
                   key={index}
                   data-thumb-index={index}
                   className={`rounded overflow-hidden cursor-pointer transition-all ${isSelected ? selectedBg : `hover:ring-1 ${darkMode ? 'hover:ring-zinc-600' : 'hover:ring-zinc-400'}`}`}
-                  style={index === previewIndex ? { outline: '2px solid #fbbf24', outlineOffset: '1px' } : undefined}
                   onClick={(e) => handleThumbnailClick(index, e)}
                   onContextMenu={(e) => handleContextMenu(e, index)}
                 >
@@ -433,10 +491,11 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
           </button>
           {deletedIndices.size > 0 && (
             <button
-              onClick={() => setDeletedIndices(new Set())}
+              onClick={() => { setDeletedIndices(new Set()); setDeleteHistory([]); }}
+              title="Restore every deleted page at once (Ctrl+Z undoes them one at a time)"
               className={`${btnBase} ${darkMode ? 'bg-zinc-700 hover:bg-zinc-600 text-zinc-200' : 'bg-zinc-300 hover:bg-zinc-400 text-zinc-800'}`}
             >
-              Undo ({deletedIndices.size})
+              Restore All ({deletedIndices.size})
             </button>
           )}
           <div className={`w-px h-5 ${border}`} />
@@ -499,8 +558,7 @@ export default function RepackViewer({ images, imageNames, extractionId, fileNam
           </button>
           <button
             onClick={() => {
-              setDeletedIndices(prev => new Set(prev).add(contextMenu.index));
-              setSelectedIndices(prev => { const n = new Set(prev); n.delete(contextMenu.index); return n; });
+              deletePages([contextMenu.index]);
               setContextMenu(null);
             }}
             className={`w-full text-left text-xs px-3 py-1.5 text-red-400 ${darkMode ? 'hover:bg-zinc-700' : 'hover:bg-zinc-100'}`}

@@ -1,4 +1,4 @@
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useRef } from 'react';
 
 export type HotkeyAction =
   // Sort actions (Phase 6 will implement the actual file operations)
@@ -9,7 +9,7 @@ export type HotkeyAction =
   | 'next-page' | 'prev-page' | 'first-page' | 'last-page'
   // App
   | 'fullscreen' | 'quit' | 'clear-log' | 'refresh'
-  | 'toggle-playlist' | 'toggle-center' | 'toggle-immerse'
+  | 'toggle-playlist' | 'toggle-center' | 'toggle-immerse' | 'toggle-shortcuts'
   | 'view-single' | 'view-dual-ltr' | 'view-dual-rtl' | 'view-scroll'
   | 'rename' | 'escape'
   // Mode switches + playlist operations (session 9)
@@ -24,9 +24,18 @@ interface UseHotkeysOptions {
   includePageNav?: boolean;
   /** Disable all hotkeys (e.g., during rename) */
   disabled?: boolean;
+  /** When true, double-tapping SPACE fires the Keep sort instead of a 2nd page turn. */
+  doubleSpaceKeeps?: boolean;
+  /** Max gap (ms) between the two SPACE presses that counts as a deliberate
+   *  double-tap. User-tunable in Settings; smaller = fewer accidental Keeps
+   *  while flipping pages at a normal rhythm. */
+  doubleSpaceMs?: number;
 }
 
-export function useHotkeys({ onAction, includePageNav = false, disabled = false }: UseHotkeysOptions) {
+export function useHotkeys({ onAction, includePageNav = false, disabled = false, doubleSpaceKeeps = false, doubleSpaceMs = 200 }: UseHotkeysOptions) {
+  // Timestamp of the last SPACE press, for double-tap-to-Keep detection.
+  const lastSpaceRef = useRef(0);
+
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if (disabled) return;
 
@@ -86,10 +95,25 @@ export function useHotkeys({ onAction, includePageNav = false, disabled = false 
 
     // Page navigation (viewer)
     if (includePageNav) {
+      // Double-tap SPACE = Keep (opt-in via the "Double Space Keeps" toggle).
+      // The FIRST tap still turns the page immediately, so normal reading never
+      // lags waiting to see whether a second tap is coming; a second tap inside
+      // the window fires 'keep' INSTEAD of turning the page again.
+      if (key === ' ') {
+        e.preventDefault();
+        const now = Date.now();
+        if (doubleSpaceKeeps && now - lastSpaceRef.current < doubleSpaceMs) {
+          lastSpaceRef.current = 0; // consume, so a 3rd tap can't chain another Keep
+          onAction('keep');
+        } else {
+          lastSpaceRef.current = now;
+          onAction('next-page');
+        }
+        return;
+      }
       switch (key) {
         case 'ArrowRight':
         case 'ArrowDown':
-        case ' ':
           e.preventDefault(); onAction('next-page'); return;
         case 'ArrowLeft':
         case 'ArrowUp':
@@ -125,6 +149,12 @@ export function useHotkeys({ onAction, includePageNav = false, disabled = false 
       // playlist (the detached playlist routes it to the viewer via the message bus).
       case 'F5':
         e.preventDefault(); onAction('refresh'); return;
+      // F1 opens the shortcut cheat-sheet. Lives in the both-windows section
+      // (not under includePageNav) so it also works while repacking, where
+      // page-nav is switched off. Closing it is handled by ShortcutsOverlay's
+      // own listener, because App disables this dispatcher while it's open.
+      case 'F1':
+        e.preventDefault(); onAction('toggle-shortcuts'); return;
     }
 
     // Sort and nav keys (single letter, case-insensitive)
@@ -140,7 +170,7 @@ export function useHotkeys({ onAction, includePageNav = false, disabled = false 
       case 'r': onAction('random-file'); return;
       case 'c': onAction('clear-log'); return;
     }
-  }, [onAction, includePageNav, disabled]);
+  }, [onAction, includePageNav, disabled, doubleSpaceKeeps, doubleSpaceMs]);
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);

@@ -7,7 +7,7 @@ import sevenBin from '7zip-bin';
 import { createViewerWindow, createPlaylistWindow, getViewerWindow, getPlaylistWindow, getWindowBounds, sendToAll, setImmerseEnabled, destroyAllBlackouts } from './window-manager';
 import { scanForCbzFiles, getFileInfoFromPaths, detectSortDestination, ensureSortFolders, sortFile, unsortFile, moveToHolding, cleanupHoldingSubfolder, listStrandedHoldingFiles, renameFile, resolveCategoryBasePath, DEFAULT_CATEGORIES, SUPPORTED_ARCHIVE_EXTS } from './file-operations';
 import { loadConfig, saveConfig } from './config-store';
-import { extractCbz, cleanupTemp, cleanupSlot, resolveImage, getSlotSources, getSlotNames, hasSlot, type ImageSource } from './cbz-extractor';
+import { extractCbz, cleanupTemp, cleanupSlot, resolveImage, getSlotSources, getSlotNames, hasSlot, getSlotDebugInfo, type ImageSource } from './cbz-extractor';
 import { saveSessionLog } from './session-logger';
 
 // Track which window type each webContents ID maps to
@@ -179,6 +179,9 @@ function parseExplorerArgv(argv: string[]): PendingArg[] {
   const isAppend = argv.includes('--append');
   const isFolder = argv.includes('--folder');
   const isRepack = argv.includes('--repack');
+  // "--folder-of" backs the .cbz-FILE verb "Open this folder in CBZ Player":
+  // %1 is the clicked file, and we open its CONTAINING folder.
+  const isFolderOf = argv.includes('--folder-of');
   const myExePathLower = process.execPath.toLowerCase();
   const paths: PendingArg[] = [];
   for (const token of argv) {
@@ -187,7 +190,18 @@ function parseExplorerArgv(argv: string[]): PendingArg[] {
     // odd shells that pass it twice) and the dev-mode "." sentinel.
     if (token.toLowerCase() === myExePathLower) continue;
     if (token === '.') continue;
-    if (isFolder) {
+    if (isFolderOf) {
+      // %1 is the clicked file; resolve its parent dir and queue it as a folder
+      // load (isFolder:true) so it reuses the normal folder-open pipeline below.
+      try {
+        if (fs.existsSync(token)) {
+          const parent = path.dirname(token);
+          if (fs.statSync(parent).isDirectory()) {
+            paths.push({ path: parent, isCompare, isAppend, isFolder: true, isRepack });
+          }
+        }
+      } catch {}
+    } else if (isFolder) {
       // Folder verb: %1 is a directory path, not a file. Confirm by stat
       // before queueing — protects against weird argv structure (e.g. a
       // file passed instead of a folder; falls through to "no usable path"
@@ -420,6 +434,49 @@ app.whenReady().then(() => {
 
   windowTypeMap.set(viewer.webContents.id, 'viewer');
   windowTypeMap.set(playlist.webContents.id, 'playlist');
+
+  // ─── Memory diagnostics (monitoring only — NO behavior change) ───────────────
+  // Added after a one-off freeze→whole-app-vanish on a long browsing session
+  // (session 13). Appends per-process memory + extraction/slot counts to a debug
+  // log that SURVIVES a crash, and logs the exact reason any process dies
+  // (Electron reports 'oom', 'crashed', etc.). If the crash recurs, this file
+  // tells us whether it's a memory leak and which process. Safe to delete.
+  const memDebugPath = path.join(app.getPath('userData'), 'cbz-mem-debug.log');
+  const appendMemLine = (line: string) => {
+    try { fs.appendFileSync(memDebugPath, line + '\n'); } catch {}
+  };
+  try {
+    // Rotate if it grew large across sessions (keep one previous file).
+    if (fs.existsSync(memDebugPath) && fs.statSync(memDebugPath).size > 2 * 1024 * 1024) {
+      try { fs.unlinkSync(memDebugPath + '.old'); } catch {}
+      try { fs.renameSync(memDebugPath, memDebugPath + '.old'); } catch {}
+    }
+  } catch {}
+  appendMemLine(`\n=== session start ${new Date().toISOString()} ===`);
+  const sampleMemory = (tag = '') => {
+    try {
+      const metrics = app.getAppMetrics();
+      const totalMB = Math.round(metrics.reduce((s, m) => s + (m.memory.workingSetSize || 0), 0) / 1024);
+      const breakdown = metrics
+        .map(m => `${m.type}:${Math.round((m.memory.workingSetSize || 0) / 1024)}MB`)
+        .join(' ');
+      const { slotCount, extractionCounter } = getSlotDebugInfo();
+      appendMemLine(`${new Date().toISOString()} | ext=${extractionCounter} slots=${slotCount} | totalMB=${totalMB} | ${breakdown}${tag ? ' | ' + tag : ''}`);
+    } catch {}
+  };
+  sampleMemory('startup');
+  const memDebugTimer = setInterval(() => sampleMemory(), 10000);
+  app.on('before-quit', () => clearInterval(memDebugTimer));
+  // Log the exact reason any process dies — 'oom' here would confirm the leak theory.
+  app.on('child-process-gone', (_e, details) => {
+    sampleMemory(`CHILD-GONE type=${details.type} reason=${details.reason} exitCode=${details.exitCode}`);
+  });
+  viewer.webContents.on('render-process-gone', (_e, details) => {
+    sampleMemory(`RENDER-GONE(viewer) reason=${details.reason} exitCode=${details.exitCode}`);
+  });
+  playlist.webContents.on('render-process-gone', (_e, details) => {
+    sampleMemory(`RENDER-GONE(playlist) reason=${details.reason} exitCode=${details.exitCode}`);
+  });
 
   // ─── Start in fullscreen if configured ──────────────────────────────────────
   if (config.startFullscreen) {

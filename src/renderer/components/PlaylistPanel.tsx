@@ -59,15 +59,25 @@ function StatsBar({ stats, sessionStartTime, fileCount, viewedCount, paneDark, t
   stats?: any; sessionStartTime?: number; fileCount: number; viewedCount: number; paneDark: boolean; t: any;
 }) {
   const [elapsed, setElapsed] = useState('00:00:00');
+  // Live wall clock (local time, 24-hour HH:MM) pinned to the far right of this
+  // row so the time is glanceable even in Immerse — the docked panel (and this
+  // status bar) stays visible in immerse. Computed in the same 1s tick as the
+  // session timer, so it costs no extra interval.
+  const [clock, setClock] = useState('');
 
   useEffect(() => {
-    if (!sessionStartTime) return;
     const tick = () => {
-      const diff = Math.floor((Date.now() - sessionStartTime) / 1000);
-      const h = String(Math.floor(diff / 3600)).padStart(2, '0');
-      const m = String(Math.floor((diff % 3600) / 60)).padStart(2, '0');
-      const s = String(diff % 60).padStart(2, '0');
-      setElapsed(`${h}:${m}:${s}`);
+      if (sessionStartTime) {
+        const diff = Math.floor((Date.now() - sessionStartTime) / 1000);
+        const h = String(Math.floor(diff / 3600)).padStart(2, '0');
+        const m = String(Math.floor((diff % 3600) / 60)).padStart(2, '0');
+        const s = String(diff % 60).padStart(2, '0');
+        setElapsed(`${h}:${m}:${s}`);
+      }
+      const now = new Date();
+      const hh = String(now.getHours()).padStart(2, '0');
+      const mm = String(now.getMinutes()).padStart(2, '0');
+      setClock(`${hh}:${mm}`);
     };
     tick();
     const id = setInterval(tick, 1000);
@@ -87,6 +97,7 @@ function StatsBar({ stats, sessionStartTime, fileCount, viewedCount, paneDark, t
       {s.inquired > 0 && <span className="text-purple-500">🔍{s.inquired}</span>}
       {s.unreadable > 0 && <span className="text-rose-500">⚠️{s.unreadable}</span>}
       <span>Viewed: {viewedCount}</span>
+      <span className="ml-auto tabular-nums" title="Current time">🕒 {clock}</span>
     </div>
   );
 }
@@ -125,6 +136,11 @@ export interface PlaylistPanelProps {
   onSetViewerDark: (v: boolean) => void;
   immerseEnabled?: boolean;
   onSetImmerse?: (v: boolean) => void;
+  /** Double-tap SPACE in the viewer = Keep. Persisted across launches.
+   *  The toggle only renders when a setter is supplied (docked panel), so the
+   *  detached playlist doesn't show a control it can't drive. */
+  doubleSpaceKeeps?: boolean;
+  onSetDoubleSpaceKeeps?: (v: boolean) => void;
   onToggleDocked: () => void;
   onNavigate: (action: 'next' | 'back' | 'random') => void;
   onJumpTo: (index: number) => void;
@@ -370,6 +386,15 @@ export default function PlaylistPanel(props: PlaylistPanelProps) {
           disabled={!isDocked}
           title={isDocked ? 'Black out every monitor except the viewer' : 'Immerse requires docked playlist'}
         />
+        {props.onSetDoubleSpaceKeeps && (
+          <ThemedToggle
+            label="Double Space Keeps"
+            checked={props.doubleSpaceKeeps ?? false}
+            onChange={(v) => props.onSetDoubleSpaceKeeps?.(v)}
+            paneDark={paneDark}
+            title="Double-tap SPACE in the viewer to Keep the current file (setting is remembered between launches)"
+          />
+        )}
       </div>
 
       {/* Sort Buttons */}

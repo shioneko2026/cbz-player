@@ -38,6 +38,12 @@ export interface AppConfig {
   beepOnLastPage: boolean;
   beepVolume: number;
   beepPitch: number;
+  /** Double-tapping SPACE in the viewer fires the Keep sort. Persisted so the
+   *  toggle (playlist panel, beside Immerse) remembers its state across launches. */
+  doubleSpaceKeeps: boolean;
+  /** Max gap (ms) between the two SPACE taps to count as a double-tap-to-Keep.
+   *  Smaller = fewer accidental Keeps while flipping pages. Tunable in Settings. */
+  doubleSpaceMs: number;
 }
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -66,6 +72,8 @@ const DEFAULT_CONFIG: AppConfig = {
   beepOnLastPage: true,
   beepVolume: 0.15,
   beepPitch: 600,
+  doubleSpaceKeeps: true,
+  doubleSpaceMs: 200,
 };
 
 function getConfigPath(): string {

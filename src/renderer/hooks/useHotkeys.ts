@@ -101,6 +101,11 @@ export function useHotkeys({ onAction, includePageNav = false, disabled = false,
       // the window fires 'keep' INSTEAD of turning the page again.
       if (key === ' ') {
         e.preventDefault();
+        // HOLDING space fires OS key-repeat keydowns rapidly (e.repeat === true).
+        // Those must NOT count as the "second tap" — a real double-tap is two
+        // SEPARATE presses. So auto-repeat just turns the page (matching held
+        // arrow keys) and never touches the tap timer or fires Keep.
+        if (e.repeat) { onAction('next-page'); return; }
         const now = Date.now();
         if (doubleSpaceKeeps && now - lastSpaceRef.current < doubleSpaceMs) {
           lastSpaceRef.current = 0; // consume, so a 3rd tap can't chain another Keep

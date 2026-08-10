@@ -181,6 +181,18 @@ function usePlaylistState() {
   const currentIndexRef = useRef(0);
   useEffect(() => { currentIndexRef.current = currentIndex; }, [currentIndex]);
 
+  // Mirror Shuffle / Skip-Viewed / the viewed set into refs so handleSort can
+  // read LIVE values without taking them as deps. Same reasoning as the refs
+  // beside navigateFile in App(): viewedPaths changes on every navigation, and
+  // handleSort sits in the global hotkey dispatcher's dep list — depending on it
+  // directly would re-subscribe the keydown listener on every single file move.
+  const shuffleRef = useRef(shuffleEnabled);
+  const skipViewedRef = useRef(skipViewedEnabled);
+  const viewedPathsRef = useRef(viewedPaths);
+  useEffect(() => { shuffleRef.current = shuffleEnabled; }, [shuffleEnabled]);
+  useEffect(() => { skipViewedRef.current = skipViewedEnabled; }, [skipViewedEnabled]);
+  useEffect(() => { viewedPathsRef.current = viewedPaths; }, [viewedPaths]);
+
   // Compare mode
   const [compareMode, setCompareMode] = useState(false);
   const [compareFileIndex, setCompareFileIndex] = useState<number | null>(null);
@@ -328,26 +340,47 @@ function usePlaylistState() {
         setLastUndo(null);
       }
 
-      // Remove from playlist and advance
+      // Remove from playlist and advance.
+      //
+      // The advance goes through the SHARED pickNextIndex so Shuffle and
+      // Skip-Viewed apply here exactly as they do to N / prev / random. This
+      // used to just hold the same index positionally — which, because the
+      // sorted file has been filtered out, silently meant "sequential next" and
+      // ignored both toggles (user-reported: with Shuffle on, Keep still walked
+      // the playlist in order).
+      //
+      // Computed OUTSIDE the setFiles updater deliberately: React Strict Mode
+      // double-invokes updater callbacks, so rolling the shuffle dice in there
+      // would produce two different indices and broadcast two different files.
       const idx = currentIndexRef.current;
-      setFiles(prev => {
-        const updated = prev.filter(f => f.fullPath !== file.fullPath);
-        let newIdx = idx;
-        if (updated.length === 0) {
-          newIdx = 0;
-        } else if (idx >= updated.length) {
-          newIdx = 0;
-        }
-        setCurrentIndex(newIdx);
-        currentIndexRef.current = newIdx;
-        // Broadcast so viewer extracts next file and detached playlist updates
-        window.electronAPI?.broadcastState({ files: updated, currentIndex: newIdx });
-        return updated;
-      });
+      const updated = files.filter(f => f.fullPath !== file.fullPath);
+      const newIdx = pickNextIndex({
+        action: 'after-remove',
+        files: updated,
+        currentIndex: idx,
+        shuffleEnabled: shuffleRef.current,
+        skipViewedEnabled: skipViewedRef.current,
+        viewedPaths: viewedPathsRef.current,
+        resetViewed,
+      }) ?? 0;
+
+      setFiles(updated);
+      setCurrentIndex(newIdx);
+      currentIndexRef.current = newIdx;
+      // Broadcast so viewer extracts next file and detached playlist updates.
+      // NB: this broadcast echoes back to THIS window (sendToAll has no sender
+      // exclusion), and onStateUpdate is what actually calls doExtract AND marks
+      // the landed file viewed — handleSort deliberately does neither itself.
+      // If the deferred self-echo fix in HANDOFF §6 is ever applied, BOTH of
+      // those have to be re-homed here or sorting stops loading the next file.
+      window.electronAPI?.broadcastState({ files: updated, currentIndex: newIdx });
     } finally {
       setIsProcessing(false);
     }
-  }, [files, sortDestination, isProcessing, lastUndo]);
+    // Shuffle / Skip-Viewed / viewedPaths are read from refs above, NOT deps —
+    // see the ref-mirror comment near currentIndexRef. resetViewed is a stable
+    // useCallback([]) identity so it costs nothing here.
+  }, [files, sortDestination, isProcessing, lastUndo, resetViewed]);
 
   // Reverse the most recent move-style sort. Moves the file from its sort
   // destination back to its original folder, re-inserts it into the playlist

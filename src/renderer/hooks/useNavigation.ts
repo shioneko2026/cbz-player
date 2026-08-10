@@ -25,10 +25,18 @@ interface NavigationOptions {
  * detached playlist's navigate honoured it). Keep this the single source of
  * truth; don't reintroduce a second copy.
  *
+ * ACTIONS:
+ *   'next' / 'back' / 'random' — explicit user navigation; `currentIndex` is a
+ *      file that still exists in `files`, so a random pick avoids re-picking it.
+ *   'after-remove' — the post-sort auto-advance. The file at `currentIndex` has
+ *      ALREADY been filtered out of `files`, so `currentIndex` is the slot it
+ *      vacated (now holding what would have been the sequential next file) and
+ *      there is no "current file" for a random pick to avoid. See below.
+ *
  * Returns null when there's nothing to navigate to.
  */
 export function pickNextIndex(opts: {
-  action: 'next' | 'back' | 'random';
+  action: 'next' | 'back' | 'random' | 'after-remove';
   files: FileInfo[];
   currentIndex: number;
   shuffleEnabled: boolean;
@@ -44,7 +52,19 @@ export function pickNextIndex(opts: {
 
   let newIndex: number;
 
-  if (action === 'random' || (action === 'next' && shuffleEnabled)) {
+  if (action === 'after-remove') {
+    // Post-sort advance. The sorted file is already gone from `files`, so the
+    // slot it vacated now holds the sequential next file — holding the index is
+    // the sequential behaviour, and it wraps to 0 when the sorted file was last.
+    // With Shuffle on we pick uniformly with NO "don't repeat" exclusion: the
+    // file the user was on no longer exists in the list, so there is nothing to
+    // avoid (excluding a slot here would just make one arbitrary file unreachable).
+    if (shuffleEnabled) {
+      newIndex = Math.floor(Math.random() * files.length);
+    } else {
+      newIndex = (currentIndex < 0 || currentIndex >= files.length) ? 0 : currentIndex;
+    }
+  } else if (action === 'random' || (action === 'next' && shuffleEnabled)) {
     // Random pick
     if (files.length === 1) {
       newIndex = 0;

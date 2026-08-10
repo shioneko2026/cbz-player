@@ -42,18 +42,33 @@
   DeleteRegKey HKCU "Software\Classes\${PROGID}\shell\repack"
 
   ; Migration: session 13 renamed the four .cbz verb subkeys with numeric
-  ; prefixes (01compare / 02repack / 03addtoplaylist / 04openfolder) to force
-  ; their order in the context menu. Windows sorts static verbs alphabetically
-  ; by SUBKEY NAME, so the prefix controls order while the visible label is
-  ; unchanged. Delete the old un-prefixed subkeys first so an over-install
-  ; doesn't leave BOTH the old and new verbs (each entry would appear twice).
+  ; prefixes (01compare / 02repack / 03addtoplaylist / 04openfolder). Delete the
+  ; old un-prefixed subkeys first so an over-install doesn't leave BOTH the old
+  ; and new verbs (each entry would appear twice).
   DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\compare"
   DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\addtoplaylist"
   DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\repack"
   DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\openfolder"
 
   ; Desired context-menu order (top→bottom): Compare, Repack, Add to Playlist,
-  ; Open this folder. Achieved via the 01–04 subkey-name prefixes below.
+  ; Open this folder.
+  ;
+  ; HOW THE ORDER IS FORCED — read before "cleaning this up" (session 14):
+  ; Session 13 assumed Windows sorts static verbs alphabetically by SUBKEY NAME
+  ; and added the 01–04 subkey prefixes. That assumption is WRONG on Windows 11
+  ; (verified on build 26200): the menu came out Add / Compare / Open / Repack,
+  ; which is alphabetical by the VISIBLE LABEL, not the subkey name. Diagnosed
+  ; with the deployed build installed, registry keys confirmed correct and free
+  ; of leftovers, and the machine freshly rebooted — so it was neither a missing
+  ; deploy nor a stale Explorer menu cache.
+  ;
+  ; So the LABELS carry the numeric prefixes ("1 Compare…", "2 Repack…", …).
+  ; The 01–04 SUBKEY prefixes are deliberately KEPT as well: they cost nothing
+  ; and they produce the same correct order on any Windows that does sort by
+  ; subkey name. Belt and suspenders — don't strip either one.
+  ;
+  ; Side effect worth knowing: because every label now starts with a digit, all
+  ; four CBZ Player verbs sort above other apps' verbs in the same menu.
 
   ; ── Verb 1 (order 01): "Compare 2 in CBZ Player" on .cbz ────────────────
   ; Shows on right-click of any .cbz REGARDLESS of which app is the default
@@ -68,7 +83,7 @@
   ;
   ; NOTE: ${APP_EXECUTABLE_FILENAME} already INCLUDES the .exe extension.
   ; Appending another .exe produces "CBZ Player.exe.exe" which doesn't exist.
-  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\01compare" "" "Compare 2 in CBZ Player"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\01compare" "" "1 Compare 2 in CBZ Player"
   WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\01compare" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
   WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\01compare\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --compare "%1"'
 
@@ -78,7 +93,7 @@
   ; running). Useful when the user wants to explicitly add files to an
   ; existing playlist instead of letting the default Open verb decide
   ; replace-vs-append based on count.
-  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\03addtoplaylist" "" "Add to CBZ Player Playlist"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\03addtoplaylist" "" "3 Add to CBZ Player Playlist"
   WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\03addtoplaylist" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
   WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\03addtoplaylist\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --append "%1"'
 
@@ -87,7 +102,7 @@
   ; the file into the playlist, extracts, and enters repack mode
   ; automatically once extraction completes. Single-file operation — if
   ; user multi-selects, only the first is taken.
-  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\02repack" "" "Repack this CBZ"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\02repack" "" "2 Repack this CBZ"
   WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\02repack" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
   WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\02repack\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --repack "%1"'
 
@@ -129,7 +144,7 @@
   ; folder, starting at the first). %1 is the FILE, so the app resolves the
   ; parent directory itself via the --folder-of flag. Lives under
   ; SystemFileAssociations\.cbz so it appears regardless of the default handler.
-  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\04openfolder" "" "Open this folder in CBZ Player"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\04openfolder" "" "4 Open this folder in CBZ Player"
   WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\04openfolder" "Icon" "$INSTDIR\${APP_EXECUTABLE_FILENAME},0"
   WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.cbz\shell\04openfolder\command" "" '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --folder-of "%1"'
 !macroend

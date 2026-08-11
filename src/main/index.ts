@@ -996,11 +996,35 @@ app.whenReady().then(() => {
     saveConfig(uiState);
   });
 
-  // Save window bounds before quitting
+  // Live mirror of the renderer's persisted UI settings. The renderer pushes
+  // this on every change (in-memory only — no disk write, so dragging the panel
+  // divider is free). It exists because UI state used to reach disk ONLY via the
+  // app:quit IPC, which fires from the in-app quit action alone: closing with the
+  // window X or Alt+F4 went viewer 'closed' -> window-all-closed -> app.quit()
+  // and persisted nothing. With this cache every exit route can save the same
+  // state, because the close handlers below have it without needing to ask the
+  // renderer (no async round-trip, no preventDefault, so there's no way to end up
+  // with a window that won't close).
+  let latestUiState: Record<string, any> = {};
+  ipcMain.on('app:ui-state', (_event, state: any) => {
+    if (state && typeof state === 'object') latestUiState = { ...latestUiState, ...state };
+  });
+
+  // Save window bounds + the mirrored UI state.
+  //
+  // Bounds keys are only included when the window is actually alive.
+  // getWindowBounds returns undefined for a destroyed window, and JSON.stringify
+  // DROPS undefined-valued keys — so spreading them unconditionally would delete
+  // the saved position of whichever window closed first. That matters now that
+  // this runs from the per-window close handlers and not just at quit.
   function saveWindowState(extraState?: any) {
+    const viewerBounds = getWindowBounds(getViewerWindow());
+    const playlistBounds = getWindowBounds(getPlaylistWindow());
     saveConfig({
-      viewerWindowBounds: getWindowBounds(getViewerWindow()),
-      playlistWindowBounds: getWindowBounds(getPlaylistWindow()),
+      ...(viewerBounds ? { viewerWindowBounds: viewerBounds } : {}),
+      ...(playlistBounds ? { playlistWindowBounds: playlistBounds } : {}),
+      ...latestUiState,
+      // An explicit payload (the app:quit uiState) is authoritative over the cache.
       ...extraState,
     });
   }
@@ -1027,6 +1051,11 @@ app.whenReady().then(() => {
 
   // ─── App Quit ──────────────────────────────────────────────────────────────
   ipcMain.on('app:quit', async (_event, uiState?: any) => {
+    // Fold the quit payload into the cache FIRST. app.quit() below closes the
+    // windows, which fires the close handlers and saves again — without this,
+    // that second save would write the older cached values back over the fresh
+    // ones we just received.
+    if (uiState && typeof uiState === 'object') latestUiState = { ...latestUiState, ...uiState };
     saveWindowState(uiState);
     // Save session log if stats were provided
     if (uiState?.sessionLog) {
@@ -1050,6 +1079,15 @@ app.whenReady().then(() => {
     cleanupTemp();
     app.quit();
   });
+
+  // ─── Persist on EVERY exit route, not just Ctrl+Q ──────────────────────────
+  // 'close' (not 'closed') fires while the window still exists, so its bounds
+  // are still readable and saveConfig's writeFileSync completes before teardown.
+  // Nothing is prevented or awaited here — the window closes exactly as before.
+  // Both windows get a handler: they're coupled, so whichever the user actually
+  // clicked closes first and records its own bounds while it's still alive.
+  viewer.on('close', () => { saveWindowState(); });
+  playlist.on('close', () => { saveWindowState(); });
 
   // ─── Coupled windows: closing one closes both ─────────────────────────────
   viewer.on('closed', () => {

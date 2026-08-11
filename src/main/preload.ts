@@ -47,6 +47,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Config
   loadConfig: () => ipcRenderer.invoke('config:load'),
   saveUiState: (state: any) => ipcRenderer.send('config:save-ui', state),
+  // Mirror UI settings into main WITHOUT writing to disk, so any exit route
+  // (window X / Alt+F4, not just Ctrl+Q) can persist them from the close
+  // handler. Cheap enough to call on every change, including drag-resizes.
+  reportUiState: (state: any) => ipcRenderer.send('app:ui-state', state),
 
   // Settings
   loadSettings: () => ipcRenderer.invoke('settings:load'),

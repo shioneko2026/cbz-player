@@ -39,6 +39,7 @@ declare global {
       quitApp: (uiState?: any) => void;
       loadConfig: () => Promise<any>;
       saveUiState: (state: any) => void;
+      reportUiState: (state: any) => void;
       setDockedMode: (docked: boolean) => void;
       toggleFullscreen: () => void;
       exitFullscreen: () => void;
@@ -1310,6 +1311,28 @@ function ViewerWindow() {
       }
     }
   }, [navigateFile, ps.handleSort, ps.isDocked, ps.paneDark, ps.viewerDark, ps.compareMode, ps.comparePickMode, ps.comparePickTwoMode, panelWidth, playlistVisible, centerPage, repackMode, images.length, ps.shuffleEnabled, ps.enterComparePickMode, ps.randomizePlaylist, ps.minLogSessionMinutes, ps.lastUndo, ps.handleUndo, ps.immerseEnabled, ps.setImmerseEnabled]);
+
+  // Mirror the persisted UI settings into the main process on every change.
+  // This is an in-memory push (no disk write), so it's cheap even while the
+  // panel divider is being dragged. Main keeps the latest copy and writes it
+  // from the window 'close' handlers, which is what makes closing via the
+  // window X / Alt+F4 persist these — that route never reaches the app:quit IPC
+  // that used to be the ONLY thing writing them.
+  //
+  // KEEP THIS LIST IN SYNC with the quitApp payload in the 'quit' case above;
+  // they're the same set of settings, minus sessionLog/pendingPurgeHeldPath
+  // (which are quit-only actions, not persisted state).
+  useEffect(() => {
+    window.electronAPI?.reportUiState?.({
+      paneDark: ps.paneDark, viewerDark: ps.viewerDark,
+      isDocked: ps.isDocked, dockedPanelWidth: panelWidth,
+      playlistVisible, centerPage,
+      writeLogsEnabled: ps.writeLogsEnabled,
+      doubleSpaceKeeps: ps.doubleSpaceKeeps,
+      doubleSpaceMs: ps.doubleSpaceMs,
+    });
+  }, [ps.paneDark, ps.viewerDark, ps.isDocked, panelWidth, playlistVisible,
+      centerPage, ps.writeLogsEnabled, ps.doubleSpaceKeeps, ps.doubleSpaceMs]);
 
   // includePageNav is off while repacking so the viewer's arrow page-nav doesn't
   // eat the keys — RepackViewer owns arrow/shift-arrow thumbnail navigation then.

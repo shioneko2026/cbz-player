@@ -227,6 +227,27 @@ function usePlaylistState() {
     });
   }, []);
 
+  // Double-space settings persist THE MOMENT THEY CHANGE, not just in the
+  // app:quit payload. Quit-only saving loses them whenever the app is closed
+  // with the window X / Alt+F4, because that route runs viewer.on('closed') →
+  // window-all-closed → app.quit() and never reaches the app:quit IPC that
+  // calls saveWindowState. It also fixes a second-order clobber: SettingsModal
+  // snapshots doubleSpaceKeeps from the last-SAVED config when it opens, so an
+  // unrelated Settings save would otherwise write a stale value back and flip
+  // the playlist-panel toggle. saveUiState → config:save-ui → saveConfig, which
+  // merges into the existing file (same mechanism logHeight already uses), so
+  // writing a single key here is safe. These wrappers are what the return
+  // object exposes; the raw setters stay private so the config-load effect
+  // above doesn't echo straight back to disk.
+  const setDoubleSpaceKeepsPersisted = useCallback((v: boolean) => {
+    setDoubleSpaceKeeps(v);
+    window.electronAPI?.saveUiState({ doubleSpaceKeeps: v });
+  }, []);
+  const setDoubleSpaceMsPersisted = useCallback((v: number) => {
+    setDoubleSpaceMs(v);
+    window.electronAPI?.saveUiState({ doubleSpaceMs: v });
+  }, []);
+
   const broadcast = useCallback((idx: number) => {
     window.electronAPI?.broadcastState({ currentIndex: idx });
   }, []);
@@ -691,8 +712,10 @@ function usePlaylistState() {
     randomizePlaylist,
     categories, setCategories,
     writeLogsEnabled, setWriteLogsEnabled,
-    doubleSpaceKeeps, setDoubleSpaceKeeps,
-    doubleSpaceMs, setDoubleSpaceMs,
+    // Expose the persisting wrappers, not the raw setters — see the comment
+    // beside their definitions. Every external caller must go through these.
+    doubleSpaceKeeps, setDoubleSpaceKeeps: setDoubleSpaceKeepsPersisted,
+    doubleSpaceMs, setDoubleSpaceMs: setDoubleSpaceMsPersisted,
     minLogSessionMinutes, setMinLogSessionMinutes,
     stats, logEntries, sessionStartTime, addLog, incrementStat, clearLog,
     navigate, jumpTo, handleViewerTheme, handleToggleDocked,

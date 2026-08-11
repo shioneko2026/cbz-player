@@ -82,9 +82,12 @@ npm run pack                             # electron-builder --win nsis → relea
                                          # REQUIRES Windows Developer Mode = On (Settings → Privacy & security
                                          # → For developers) to extract bundled winCodeSign symlinks
 
-# Typecheck only (no compile output)
-npx tsc -p tsconfig.node.json --noEmit
-npx tsc -p tsconfig.json --noEmit --ignoreDeprecations 6.0
+# Typecheck only (no compile output) — call the local compiler through node.
+# Do NOT use `npx tsc` here: it resolves to a placeholder package that prints
+# "This is not the tsc command you are looking for" and exits 1 without ever
+# running the project compiler.
+node node_modules/typescript/bin/tsc -p tsconfig.node.json --noEmit
+node node_modules/typescript/bin/tsc -p tsconfig.json --noEmit --ignoreDeprecations 6.0
 # Both should exit 0 since session 10. Any errors = regression.
 ```
 

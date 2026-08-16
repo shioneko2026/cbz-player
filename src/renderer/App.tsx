@@ -1,6 +1,6 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { FileInfo } from './lib/types';
-import { useNavigation, pickNextIndex } from './hooks/useNavigation';
+import { useNavigation, pickNextIndexFiltered, computeActiveIndices } from './hooks/useNavigation';
 import { useHotkeys, HotkeyAction } from './hooks/useHotkeys';
 import CbzViewer from './components/CbzViewer';
 import ShortcutsOverlay from './components/ShortcutsOverlay';
@@ -162,12 +162,13 @@ function usePlaylistState() {
   const [sortDestination, setSortDestination] = useState<string | null>(null);
   const [shuffleEnabled, setShuffleEnabled] = useState(false);
   const [skipViewedEnabled, setSkipViewedEnabled] = useState(false);
+  // Playlist search. Transient by design — never persisted, so it always starts
+  // empty on launch (same policy as Immerse). `files` is NEVER filtered: the
+  // playlist keeps every file and the search only narrows which POSITIONS are
+  // currently selectable, so rename/undo/compare/repack keep working on real
+  // indices and clearing the box restores the full list for free.
+  const [searchQuery, setSearchQuery] = useState('');
   const [writeLogsEnabled, setWriteLogsEnabled] = useState(false);
-  // Double-tap SPACE = Keep. Persisted (see loadConfig below + the app:quit
-  // uiState payload), so the toggle remembers its state across launches.
-  const [doubleSpaceKeeps, setDoubleSpaceKeeps] = useState(true);
-  // Max gap (ms) between the two SPACE taps to count as double-tap-to-Keep. Tunable in Settings.
-  const [doubleSpaceMs, setDoubleSpaceMs] = useState(200);
   const [minLogSessionMinutes, setMinLogSessionMinutes] = useState(5);
   const [globalHotkeys, setGlobalHotkeys] = useState(false);
   const [viewedPaths, setViewedPaths] = useState<Set<string>>(new Set());
@@ -190,9 +191,18 @@ function usePlaylistState() {
   const shuffleRef = useRef(shuffleEnabled);
   const skipViewedRef = useRef(skipViewedEnabled);
   const viewedPathsRef = useRef(viewedPaths);
+  const searchQueryRef = useRef(searchQuery);
   useEffect(() => { shuffleRef.current = shuffleEnabled; }, [shuffleEnabled]);
   useEffect(() => { skipViewedRef.current = skipViewedEnabled; }, [skipViewedEnabled]);
   useEffect(() => { viewedPathsRef.current = viewedPaths; }, [viewedPaths]);
+  useEffect(() => { searchQueryRef.current = searchQuery; }, [searchQuery]);
+
+  // Which playlist positions the search currently matches; null = no search.
+  // Derived, never stored — so a sort, rename, F5 or drop can't leave it stale.
+  const activeIndices = useMemo(
+    () => computeActiveIndices(files, searchQuery),
+    [files, searchQuery],
+  );
 
   // Compare mode
   const [compareMode, setCompareMode] = useState(false);
@@ -221,33 +231,17 @@ function usePlaylistState() {
       if (cfg.isDocked !== undefined) setIsDocked(cfg.isDocked);
       if (cfg.categories?.length > 0) setCategories(cfg.categories);
       if (cfg.writeLogsEnabled !== undefined) setWriteLogsEnabled(cfg.writeLogsEnabled);
-      if (cfg.doubleSpaceKeeps !== undefined) setDoubleSpaceKeeps(cfg.doubleSpaceKeeps);
-      if (cfg.doubleSpaceMs !== undefined) setDoubleSpaceMs(cfg.doubleSpaceMs);
       if (cfg.minLogSessionMinutes !== undefined) setMinLogSessionMinutes(cfg.minLogSessionMinutes);
       setConfigLoaded(true);
     });
   }, []);
 
-  // Double-space settings persist THE MOMENT THEY CHANGE, not just in the
-  // app:quit payload. Quit-only saving loses them whenever the app is closed
-  // with the window X / Alt+F4, because that route runs viewer.on('closed') →
-  // window-all-closed → app.quit() and never reaches the app:quit IPC that
-  // calls saveWindowState. It also fixes a second-order clobber: SettingsModal
-  // snapshots doubleSpaceKeeps from the last-SAVED config when it opens, so an
-  // unrelated Settings save would otherwise write a stale value back and flip
-  // the playlist-panel toggle. saveUiState → config:save-ui → saveConfig, which
-  // merges into the existing file (same mechanism logHeight already uses), so
-  // writing a single key here is safe. These wrappers are what the return
-  // object exposes; the raw setters stay private so the config-load effect
-  // above doesn't echo straight back to disk.
-  const setDoubleSpaceKeepsPersisted = useCallback((v: boolean) => {
-    setDoubleSpaceKeeps(v);
-    window.electronAPI?.saveUiState({ doubleSpaceKeeps: v });
-  }, []);
-  const setDoubleSpaceMsPersisted = useCallback((v: number) => {
-    setDoubleSpaceMs(v);
-    window.electronAPI?.saveUiState({ doubleSpaceMs: v });
-  }, []);
+  // NOTE: the persist-on-change wrappers that lived here were for the
+  // double-space settings, removed in session 15 along with the gesture. The
+  // ROUTE they used is still the right one for any new discrete toggle:
+  // saveUiState → config:save-ui → saveConfig (a merging write), which survives
+  // closing the app with the window X / Alt+F4. See Architecture.md's
+  // "Window State Persistence" table for when to use it vs. reportUiState.
 
   const broadcast = useCallback((idx: number) => {
     window.electronAPI?.broadcastState({ currentIndex: idx });
@@ -268,7 +262,7 @@ function usePlaylistState() {
   const clearLog = useCallback(() => { setLogEntries([]); }, []);
 
   const { navigate, jumpTo } = useNavigation({
-    files, currentIndex, shuffleEnabled, skipViewedEnabled, viewedPaths,
+    files, activeIndices, currentIndex, shuffleEnabled, skipViewedEnabled, viewedPaths,
     setCurrentIndex, addViewed, resetViewed, broadcast,
   });
 
@@ -374,11 +368,16 @@ function usePlaylistState() {
       // Computed OUTSIDE the setFiles updater deliberately: React Strict Mode
       // double-invokes updater callbacks, so rolling the shuffle dice in there
       // would produce two different indices and broadcast two different files.
+      // While a search is active the advance stays inside the matches. Note the
+      // active set is recomputed against `updated`, NOT the memoized one: that
+      // was derived from the pre-removal list, and removing a file shifts every
+      // index after it.
       const idx = currentIndexRef.current;
       const updated = files.filter(f => f.fullPath !== file.fullPath);
-      const newIdx = pickNextIndex({
+      const newIdx = pickNextIndexFiltered({
         action: 'after-remove',
         files: updated,
+        activeIndices: computeActiveIndices(updated, searchQueryRef.current),
         currentIndex: idx,
         shuffleEnabled: shuffleRef.current,
         skipViewedEnabled: skipViewedRef.current,
@@ -700,6 +699,7 @@ function usePlaylistState() {
   return {
     files, setFiles, currentIndex, setCurrentIndex, sortDestination, setSortDestination,
     shuffleEnabled, setShuffleEnabled, skipViewedEnabled, setSkipViewedEnabled,
+    searchQuery, setSearchQuery, activeIndices,
     globalHotkeys, setGlobalHotkeys, viewedPaths, setViewedPaths,
     paneDark, setPaneDark, viewerDark, setViewerDark, isDocked,
     immerseEnabled, setImmerseEnabled,
@@ -715,8 +715,6 @@ function usePlaylistState() {
     writeLogsEnabled, setWriteLogsEnabled,
     // Expose the persisting wrappers, not the raw setters — see the comment
     // beside their definitions. Every external caller must go through these.
-    doubleSpaceKeeps, setDoubleSpaceKeeps: setDoubleSpaceKeepsPersisted,
-    doubleSpaceMs, setDoubleSpaceMs: setDoubleSpaceMsPersisted,
     minLogSessionMinutes, setMinLogSessionMinutes,
     stats, logEntries, sessionStartTime, addLog, incrementStat, clearLog,
     navigate, jumpTo, handleViewerTheme, handleToggleDocked,
@@ -892,9 +890,13 @@ function ViewerWindow() {
   const shuffleRef = useRef(ps.shuffleEnabled);
   const skipViewedRef = useRef(ps.skipViewedEnabled);
   const viewedPathsRef = useRef(ps.viewedPaths);
+  const searchQueryRef = useRef(ps.searchQuery);
+  // Ctrl+F focus target for the docked panel's search box.
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => { shuffleRef.current = ps.shuffleEnabled; }, [ps.shuffleEnabled]);
   useEffect(() => { skipViewedRef.current = ps.skipViewedEnabled; }, [ps.skipViewedEnabled]);
   useEffect(() => { viewedPathsRef.current = ps.viewedPaths; }, [ps.viewedPaths]);
+  useEffect(() => { searchQueryRef.current = ps.searchQuery; }, [ps.searchQuery]);
 
   const navigateFile = useCallback((direction: 'next' | 'prev' | 'random') => {
     const f = filesRef.current;
@@ -903,9 +905,14 @@ function ViewerWindow() {
     // identically whether you navigate from the viewer or the detached playlist.
     // This used to be a separate copy that ignored both toggles — which is why
     // Shuffle appeared to do nothing when navigating from the viewer.
-    const picked = pickNextIndex({
+    // While a search is active, Next/Back/Random cycle the matches only. Read
+    // from a ref, not the memoized activeIndices, for the same reason the other
+    // toggles are: this callback must keep a stable identity or the global
+    // keydown listener re-subscribes on every file move.
+    const picked = pickNextIndexFiltered({
       action: direction === 'prev' ? 'back' : direction,
       files: f,
+      activeIndices: computeActiveIndices(f, searchQueryRef.current),
       currentIndex: indexRef.current,
       shuffleEnabled: shuffleRef.current,
       skipViewedEnabled: skipViewedRef.current,
@@ -1056,6 +1063,7 @@ function ViewerWindow() {
       viewedPaths: [...ps.viewedPaths], // Serialize Set to array
       shuffleEnabled: ps.shuffleEnabled,
       skipViewedEnabled: ps.skipViewedEnabled,
+      searchQuery: ps.searchQuery,
       writeLogsEnabled: ps.writeLogsEnabled,
       globalHotkeys: ps.globalHotkeys,
       paneDark: ps.paneDark,
@@ -1079,7 +1087,7 @@ function ViewerWindow() {
         : undefined,
     });
   }, [ps.files, ps.currentIndex, ps.sortDestination, ps.viewedPaths, ps.shuffleEnabled,
-      ps.skipViewedEnabled, ps.globalHotkeys, ps.paneDark, ps.viewerDark, ps.isDocked, ps.categories,
+      ps.skipViewedEnabled, ps.searchQuery, ps.globalHotkeys, ps.paneDark, ps.viewerDark, ps.isDocked, ps.categories,
       ps.stats, ps.logEntries,
       ps.renamingIndex, ps.compareMode, ps.compareFileIndex, ps.comparePickMode,
       ps.comparePickTwoMode, ps.compareLeftIndex, ps.lastUndo]);
@@ -1102,6 +1110,7 @@ function ViewerWindow() {
           break;
         }
         case 'setShuffle': ps.setShuffleEnabled(action.value); break;
+        case 'setSearchQuery': ps.setSearchQuery(action.value); break;
         case 'setSkipViewed': ps.setSkipViewedEnabled(action.value); break;
         case 'setWriteLogs': ps.setWriteLogsEnabled(action.value); break;
         case 'setGlobalHotkeys': ps.setGlobalHotkeys(action.value); break;
@@ -1266,6 +1275,20 @@ function ViewerWindow() {
         if (!repackMode && !ps.compareMode && images.length > 0) setRepackMode(true);
         break;
       case 'toggle-shortcuts': setShortcutsOpen(v => !v); break;
+      case 'focus-search':
+        // Reveal the panel first if it's hidden — otherwise Ctrl+F would appear
+        // to do nothing. Focus is deferred by TWO frames, not one: when the panel
+        // was hidden, React still has to render the input before it can be
+        // focused, and a single rAF can land before that commit.
+        // NOTE: no-ops when the playlist is DETACHED — the docked panel isn't
+        // mounted then, so there's no input in this window. The detached window
+        // has its own Ctrl+F for its own box.
+        if (!playlistVisible) setPlaylistVisible(true);
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const el = searchInputRef.current;
+          if (el) { el.focus(); el.select(); }
+        }));
+        break;
       case 'toggle-shuffle': ps.setShuffleEnabled(!ps.shuffleEnabled); break;
       case 'randomize-playlist': ps.randomizePlaylist(); break;
       case 'keep': case 'purge': case 'fix': case 'translate':
@@ -1297,8 +1320,6 @@ function ViewerWindow() {
           isDocked: ps.isDocked, dockedPanelWidth: panelWidth,
           playlistVisible, centerPage,
           writeLogsEnabled: ps.writeLogsEnabled,
-          doubleSpaceKeeps: ps.doubleSpaceKeeps,
-          doubleSpaceMs: ps.doubleSpaceMs,
           sessionLog: (ps.sortDestination && ps.writeLogsEnabled && meetsMinDuration) ? {
             sortDestination: ps.sortDestination,
             startTime: ps.sessionStartTime,
@@ -1328,16 +1349,14 @@ function ViewerWindow() {
       isDocked: ps.isDocked, dockedPanelWidth: panelWidth,
       playlistVisible, centerPage,
       writeLogsEnabled: ps.writeLogsEnabled,
-      doubleSpaceKeeps: ps.doubleSpaceKeeps,
-      doubleSpaceMs: ps.doubleSpaceMs,
     });
   }, [ps.paneDark, ps.viewerDark, ps.isDocked, panelWidth, playlistVisible,
-      centerPage, ps.writeLogsEnabled, ps.doubleSpaceKeeps, ps.doubleSpaceMs]);
+      centerPage, ps.writeLogsEnabled]);
 
   // includePageNav is off while repacking so the viewer's arrow page-nav doesn't
   // eat the keys — RepackViewer owns arrow/shift-arrow thumbnail navigation then.
   // Other hotkeys (sort, undo, quit, immerse) stay live in repack by design.
-  useHotkeys({ onAction: handleAction, includePageNav: !repackMode, disabled: settingsOpen || shortcutsOpen, doubleSpaceKeeps: ps.doubleSpaceKeeps, doubleSpaceMs: ps.doubleSpaceMs });
+  useHotkeys({ onAction: handleAction, includePageNav: !repackMode, disabled: settingsOpen || shortcutsOpen });
 
   const currentFile = ps.files[ps.currentIndex] ?? null;
   // "Left"/"right" files in compare mode. Pick-two and Explorer-launched compare
@@ -1533,6 +1552,9 @@ function ViewerWindow() {
               viewedPaths={ps.viewedPaths}
               shuffleEnabled={ps.shuffleEnabled}
               skipViewedEnabled={ps.skipViewedEnabled}
+              searchQuery={ps.searchQuery}
+              onSetSearchQuery={ps.setSearchQuery}
+              searchInputRef={searchInputRef}
               globalHotkeys={ps.globalHotkeys}
               paneDark={ps.paneDark}
               viewerDark={ps.viewerDark}
@@ -1544,8 +1566,6 @@ function ViewerWindow() {
               onSetShuffle={ps.setShuffleEnabled}
               onSetSkipViewed={ps.setSkipViewedEnabled}
               writeLogsEnabled={ps.writeLogsEnabled}
-              doubleSpaceKeeps={ps.doubleSpaceKeeps}
-              onSetDoubleSpaceKeeps={ps.setDoubleSpaceKeeps}
               onSetWriteLogs={ps.setWriteLogsEnabled}
               onSetGlobalHotkeys={ps.setGlobalHotkeys}
               onSetPaneDark={ps.setPaneDark}
@@ -1614,8 +1634,6 @@ function ViewerWindow() {
             if (cfg.repackThumbnailSize) setRepackThumbnailSize(cfg.repackThumbnailSize);
             if (cfg.repackPanelWidth) setRepackPanelWidth(cfg.repackPanelWidth);
             if (cfg.minLogSessionMinutes !== undefined) ps.setMinLogSessionMinutes(cfg.minLogSessionMinutes);
-            if (cfg.doubleSpaceKeeps !== undefined) ps.setDoubleSpaceKeeps(cfg.doubleSpaceKeeps);
-            if (cfg.doubleSpaceMs !== undefined) ps.setDoubleSpaceMs(cfg.doubleSpaceMs);
             (window as any).__cbzSettings = {
               beepOnLastPage: cfg.beepOnLastPage ?? true,
               beepVolume: cfg.beepVolume ?? 0.15,
@@ -1639,11 +1657,15 @@ function PlaylistWindow() {
   // All state received from the viewer window via IPC
   const [state, setState] = useState<any>({
     files: [], currentIndex: 0, sortDestination: null, viewedPaths: [],
-    shuffleEnabled: false, skipViewedEnabled: false, globalHotkeys: false,
+    shuffleEnabled: false, skipViewedEnabled: false, searchQuery: '', globalHotkeys: false,
     paneDark: true, viewerDark: true, isDocked: false,
     renamingIndex: null, compareMode: false, compareFileIndex: null,
     comparePickMode: false, comparePickTwoMode: false, compareLeftIndex: null,
   });
+
+  // Ctrl+F focus target for this window's own search box. The query itself
+  // lives in the viewer (single source of truth) and arrives via state:update.
+  const playlistSearchRef = useRef<HTMLInputElement | null>(null);
 
   // Receive state updates from viewer
   useEffect(() => {
@@ -1684,6 +1706,7 @@ function PlaylistWindow() {
       case 'enter-compare': send({ type: 'enterComparePickMode' }); break;
       case 'enter-repack': send({ type: 'repack' }); break;
       case 'toggle-shuffle': send({ type: 'setShuffle', value: !state.shuffleEnabled }); break;
+      case 'focus-search': playlistSearchRef.current?.focus(); break;
       case 'randomize-playlist': send({ type: 'randomizePlaylist' }); break;
       case 'undo': send({ type: 'undo' }); break;
       case 'quit': window.electronAPI?.quitApp({
@@ -1710,6 +1733,9 @@ function PlaylistWindow() {
         viewedPaths={viewedPathsSet}
         shuffleEnabled={state.shuffleEnabled}
         skipViewedEnabled={state.skipViewedEnabled}
+        searchQuery={state.searchQuery ?? ''}
+        onSetSearchQuery={(v: string) => send({ type: 'setSearchQuery', value: v })}
+        searchInputRef={playlistSearchRef}
         globalHotkeys={state.globalHotkeys}
         paneDark={state.paneDark}
         viewerDark={state.viewerDark}

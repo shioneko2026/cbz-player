@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { FileInfo } from '../lib/types';
+import { computeActiveIndices } from '../hooks/useNavigation';
 
 // ─── Sub-components ────────────────────────────────────────────────────────────
 
@@ -136,11 +137,14 @@ export interface PlaylistPanelProps {
   onSetViewerDark: (v: boolean) => void;
   immerseEnabled?: boolean;
   onSetImmerse?: (v: boolean) => void;
-  /** Double-tap SPACE in the viewer = Keep. Persisted across launches.
-   *  The toggle only renders when a setter is supplied (docked panel), so the
-   *  detached playlist doesn't show a control it can't drive. */
-  doubleSpaceKeeps?: boolean;
-  onSetDoubleSpaceKeeps?: (v: boolean) => void;
+  /** Playlist search. The query lives in the viewer (single source of truth);
+   *  the detached window drives it over IPC. Filtering is display-only here —
+   *  `files` always holds every file, and idx stays a REAL playlist position so
+   *  jump/rename/compare keep working unchanged. */
+  searchQuery?: string;
+  onSetSearchQuery?: (v: string) => void;
+  /** Focus target for Ctrl+F. */
+  searchInputRef?: React.RefObject<HTMLInputElement | null>;
   onToggleDocked: () => void;
   onNavigate: (action: 'next' | 'back' | 'random') => void;
   onJumpTo: (index: number) => void;
@@ -231,6 +235,15 @@ export default function PlaylistPanel(props: PlaylistPanelProps) {
   }, [selectionMode, exitSelectionMode]);
 
   const playlistRef = useRef<HTMLDivElement>(null);
+
+  // Rows the search currently shows, each keeping its REAL playlist position so
+  // click/jump/rename/compare all keep addressing the true index. Uses the same
+  // computeActiveIndices the navigation does, so what you see and what Next/Back
+  // cycle can never disagree.
+  const searchActive = computeActiveIndices(files, props.searchQuery ?? '');
+  const visibleRows = searchActive === null
+    ? files.map((file, idx) => ({ file, idx }))
+    : searchActive.map(idx => ({ file: files[idx], idx }));
   const logPanelRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll log to bottom when new entries arrive
@@ -386,15 +399,6 @@ export default function PlaylistPanel(props: PlaylistPanelProps) {
           disabled={!isDocked}
           title={isDocked ? 'Black out every monitor except the viewer' : 'Immerse requires docked playlist'}
         />
-        {props.onSetDoubleSpaceKeeps && (
-          <ThemedToggle
-            label="Double Space Keeps"
-            checked={props.doubleSpaceKeeps ?? false}
-            onChange={(v) => props.onSetDoubleSpaceKeeps?.(v)}
-            paneDark={paneDark}
-            title="Double-tap SPACE in the viewer to Keep the current file (setting is remembered between launches)"
-          />
-        )}
       </div>
 
       {/* Sort Buttons */}
@@ -451,6 +455,52 @@ export default function PlaylistPanel(props: PlaylistPanelProps) {
         </button>
       </div>
 
+      {/* Playlist search — filters the list AND becomes the working set for
+          Next/Back, Shuffle and the post-sort advance. Enter leaves the box
+          keeping the filter, because every hotkey is dead while an input has
+          focus (see the guard at the top of useHotkeys). */}
+      {props.onSetSearchQuery && (
+        <div className={`px-3 pb-2 ${paneDark ? 'bg-zinc-900' : 'bg-zinc-50'}`}>
+          <div className="relative">
+            <span className={`absolute left-2 top-1/2 -translate-y-1/2 text-xs ${t.empty} pointer-events-none`}>🔎</span>
+            <input
+              ref={props.searchInputRef}
+              type="text"
+              value={props.searchQuery ?? ''}
+              onChange={(e) => props.onSetSearchQuery?.(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur(); }
+              }}
+              placeholder="Search playlist (Ctrl+F)"
+              spellCheck={false}
+              className={`w-full pl-7 pr-7 py-1 text-xs rounded border outline-none transition-colors ${
+                paneDark
+                  ? 'bg-zinc-800 border-zinc-700 text-zinc-200 placeholder-zinc-600 focus:border-sky-600'
+                  : 'bg-white border-zinc-300 text-zinc-800 placeholder-zinc-400 focus:border-sky-500'
+              }`}
+            />
+            {(props.searchQuery ?? '') !== '' && (
+              <button
+                onClick={() => { props.onSetSearchQuery?.(''); props.searchInputRef?.current?.focus(); }}
+                title="Clear search (restores the full playlist)"
+                className={`absolute right-1 top-1/2 -translate-y-1/2 px-1 text-xs rounded ${
+                  paneDark ? 'text-zinc-500 hover:text-zinc-200' : 'text-zinc-400 hover:text-zinc-700'
+                }`}
+              >
+                ✕
+              </button>
+            )}
+          </div>
+          {searchActive !== null && (
+            <p className={`mt-1 text-[10px] ${t.empty}`}>
+              {searchActive.length === 0
+                ? 'No matches — Next/Back have nothing to cycle'
+                : `${searchActive.length} of ${files.length} shown — Next/Back cycle these`}
+            </p>
+          )}
+        </div>
+      )}
+
       {/* Compare pick mode banner */}
       {comparePickMode && (
         <div className={`px-4 py-2 text-xs border-b ${t.border} ${paneDark ? 'bg-orange-900/30 text-orange-300' : 'bg-orange-100 text-orange-700'}`}>
@@ -469,9 +519,22 @@ export default function PlaylistPanel(props: PlaylistPanelProps) {
       <div ref={playlistRef} className="flex-1 overflow-y-auto px-1 py-1 min-h-0">
         {files.length === 0 ? (
           <p className={`text-xs ${t.empty} text-center py-8`}>Drop CBZ files or a folder to start sorting</p>
+        ) : visibleRows.length === 0 ? (
+          /* Search matched nothing. Offer the way out rather than a blank pane. */
+          <div className="text-center py-8 px-3">
+            <p className={`text-xs ${t.empty}`}>No files match “{props.searchQuery}”</p>
+            <button
+              onClick={() => { props.onSetSearchQuery?.(''); props.searchInputRef?.current?.focus(); }}
+              className={`mt-2 px-2 py-1 text-xs rounded ${
+                paneDark ? 'bg-zinc-700 hover:bg-zinc-600 text-zinc-200' : 'bg-zinc-300 hover:bg-zinc-400 text-zinc-800'
+              }`}
+            >
+              Clear search
+            </button>
+          </div>
         ) : (
           <div className="space-y-px">
-            {files.map((file, idx) => {
+            {visibleRows.map(({ file, idx }) => {
               const isCurrent = idx === currentIndex;
               const isViewed = viewedPaths.has(file.fullPath);
               const isRenaming = renamingIndex === idx;

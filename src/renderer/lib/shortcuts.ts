@@ -11,7 +11,7 @@
  * This is a read-only reference — it does not define the bindings, it
  * documents them. The real bindings live in:
  *   - src/renderer/hooks/useHotkeys.ts   (global dispatcher)
- *   - CbzViewer.tsx / CompareViewer.tsx  (local Ctrl+F fit-cycle, middle-click sync)
+ *   - CbzViewer.tsx / CompareViewer.tsx  (local Ctrl+Shift+F fit-cycle, middle-click sync)
  *   - RepackViewer.tsx                   (repack-only keys)
  */
 
@@ -33,7 +33,6 @@ export function getShortcutGroups(categories: CategoryLike[]): ShortcutGroup[] {
       ...categories
         .filter(c => c.hotkey)
         .map(c => [c.hotkey!.toUpperCase(), c.label] as ShortcutRow),
-      ['Space Space', 'Double-tap Space = Keep (when "Double Space Keeps" is on)'],
       ['Ctrl+Z', 'Undo last sort (including purge)'],
     ]],
     ['File navigation', [
@@ -42,6 +41,8 @@ export function getShortcutGroups(categories: CategoryLike[]): ShortcutGroup[] {
       ['R', 'Random file'],
       ['] / \\', 'Next file'],
       ['[ / Backspace', 'Previous file'],
+      ['Ctrl+F', 'Search the playlist (filters it; Next/Back then cycle the matches)'],
+      ['Enter', 'Leave the search box, keeping the filter (in the search box)'],
     ]],
     ['Page navigation (viewer)', [
       ['← ↑', 'Previous page'],
@@ -55,7 +56,7 @@ export function getShortcutGroups(categories: CategoryLike[]): ShortcutGroup[] {
       ['Ctrl+3', 'Dual RTL'],
       ['Ctrl+4', 'Vertical scroll'],
       ['Ctrl+E', 'Toggle center page'],
-      ['Ctrl+F', 'Cycle fit mode: Fit → Height → Width'],
+      ['Ctrl+Shift+F', 'Cycle fit mode: Fit → Height → Width'],
       ['Ctrl+Wheel', 'Zoom in / out'],
     ]],
     ['Modes', [
@@ -66,7 +67,7 @@ export function getShortcutGroups(categories: CategoryLike[]): ShortcutGroup[] {
     ]],
     ['Compare mode', [
       ['Middle-click', 'Toggle page-sync between the two files'],
-      ['Ctrl+F', 'Cycle fit mode'],
+      ['Ctrl+Shift+F', 'Cycle fit mode'],
     ]],
     ['Repack mode', [
       ['Click', 'Select that page (red); replaces the selection'],

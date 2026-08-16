@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useRef } from 'react';
+import { useEffect, useCallback } from 'react';
 
 export type HotkeyAction =
   // Sort actions (Phase 6 will implement the actual file operations)
@@ -10,6 +10,7 @@ export type HotkeyAction =
   // App
   | 'fullscreen' | 'quit' | 'clear-log' | 'refresh'
   | 'toggle-playlist' | 'toggle-center' | 'toggle-immerse' | 'toggle-shortcuts'
+  | 'focus-search'
   | 'view-single' | 'view-dual-ltr' | 'view-dual-rtl' | 'view-scroll'
   | 'rename' | 'escape'
   // Mode switches + playlist operations (session 9)
@@ -24,18 +25,9 @@ interface UseHotkeysOptions {
   includePageNav?: boolean;
   /** Disable all hotkeys (e.g., during rename) */
   disabled?: boolean;
-  /** When true, double-tapping SPACE fires the Keep sort instead of a 2nd page turn. */
-  doubleSpaceKeeps?: boolean;
-  /** Max gap (ms) between the two SPACE presses that counts as a deliberate
-   *  double-tap. User-tunable in Settings; smaller = fewer accidental Keeps
-   *  while flipping pages at a normal rhythm. */
-  doubleSpaceMs?: number;
 }
 
-export function useHotkeys({ onAction, includePageNav = false, disabled = false, doubleSpaceKeeps = false, doubleSpaceMs = 200 }: UseHotkeysOptions) {
-  // Timestamp of the last SPACE press, for double-tap-to-Keep detection.
-  const lastSpaceRef = useRef(0);
-
+export function useHotkeys({ onAction, includePageNav = false, disabled = false }: UseHotkeysOptions) {
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if (disabled) return;
 
@@ -69,6 +61,10 @@ export function useHotkeys({ onAction, includePageNav = false, disabled = false,
     if (ctrl && !shift && !alt) {
       switch (key.toLowerCase()) {
         case 'q': e.preventDefault(); onAction('quit'); return;
+        // Ctrl+F = focus the playlist search box, matching every other app.
+        // The fit-mode cycle it used to trigger moved to Ctrl+Shift+F (session
+        // 15) — those listeners live locally in CbzViewer/CompareViewer, not here.
+        case 'f': e.preventDefault(); onAction('focus-search'); return;
         case 'r': e.preventDefault(); onAction('toggle-shuffle'); return;
         case 'i': e.preventDefault(); onAction('toggle-immerse'); return;
         case 'e': e.preventDefault(); onAction('toggle-center'); return;
@@ -95,25 +91,13 @@ export function useHotkeys({ onAction, includePageNav = false, disabled = false,
 
     // Page navigation (viewer)
     if (includePageNav) {
-      // Double-tap SPACE = Keep (opt-in via the "Double Space Keeps" toggle).
-      // The FIRST tap still turns the page immediately, so normal reading never
-      // lags waiting to see whether a second tap is coming; a second tap inside
-      // the window fires 'keep' INSTEAD of turning the page again.
+      // SPACE turns the page. (Double-tap-Space-to-Keep was removed in session
+      // 15 — the user found it redundant and never adopted it. Don't reinstate
+      // it without asking: it made every Space press ambiguous for the length of
+      // the double-tap window, which is the reason it was dropped.)
       if (key === ' ') {
         e.preventDefault();
-        // HOLDING space fires OS key-repeat keydowns rapidly (e.repeat === true).
-        // Those must NOT count as the "second tap" — a real double-tap is two
-        // SEPARATE presses. So auto-repeat just turns the page (matching held
-        // arrow keys) and never touches the tap timer or fires Keep.
-        if (e.repeat) { onAction('next-page'); return; }
-        const now = Date.now();
-        if (doubleSpaceKeeps && now - lastSpaceRef.current < doubleSpaceMs) {
-          lastSpaceRef.current = 0; // consume, so a 3rd tap can't chain another Keep
-          onAction('keep');
-        } else {
-          lastSpaceRef.current = now;
-          onAction('next-page');
-        }
+        onAction('next-page');
         return;
       }
       switch (key) {
@@ -175,7 +159,7 @@ export function useHotkeys({ onAction, includePageNav = false, disabled = false,
       case 'r': onAction('random-file'); return;
       case 'c': onAction('clear-log'); return;
     }
-  }, [onAction, includePageNav, disabled, doubleSpaceKeeps, doubleSpaceMs]);
+  }, [onAction, includePageNav, disabled]);
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);

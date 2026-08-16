@@ -89,7 +89,9 @@ export default function CbzViewer({ images, extractionId, darkMode, onPageChange
   // fire when typing in inputs (rename, settings, etc.).
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey) return;
+      // Ctrl+SHIFT+F cycles fit mode. It moved off plain Ctrl+F in session 15,
+      // which now focuses the playlist search box (see useHotkeys).
+      if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || e.altKey) return;
       if (e.key.toLowerCase() !== 'f') return;
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;

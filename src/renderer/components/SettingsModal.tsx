@@ -102,8 +102,6 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
   const [beepOnLastPage, setBeepOnLastPage] = useState(true);
   const [beepVolume, setBeepVolume] = useState(0.15);
   const [beepPitch, setBeepPitch] = useState(600);
-  const [doubleSpaceKeeps, setDoubleSpaceKeeps] = useState(true);
-  const [doubleSpaceMs, setDoubleSpaceMs] = useState(200);
   const [repackColumns, setRepackColumns] = useState(3);
   const [repackThumbnailSize, setRepackThumbnailSize] = useState(150);
   const [repackPanelWidth, setRepackPanelWidth] = useState(40);
@@ -156,8 +154,6 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
       setBeepOnLastPage(config.beepOnLastPage ?? true);
       setBeepVolume(config.beepVolume ?? 0.15);
       setBeepPitch(config.beepPitch ?? 600);
-      setDoubleSpaceKeeps(config.doubleSpaceKeeps ?? true);
-      setDoubleSpaceMs(config.doubleSpaceMs ?? 200);
       setRepackColumns(config.repackColumns ?? 3);
       setRepackThumbnailSize(config.repackThumbnailSize ?? 150);
       setRepackPanelWidth(config.repackPanelWidth ?? 40);
@@ -227,8 +223,6 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
       beepOnLastPage,
       beepVolume,
       beepPitch,
-      doubleSpaceKeeps,
-      doubleSpaceMs,
       repackColumns,
       repackThumbnailSize,
       repackPanelWidth,
@@ -236,7 +230,7 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
     });
     onSaved?.();
     onClose();
-  }, [categories, hasBlockingErrors, viewerMode, controlsHideDelay, controlBarMode, defaultDocked, defaultPanelWidth, startFullscreen, darkBgBrightness, lightBgBrightness, useSourceFolder, customOutputFolder, beepOnLastPage, beepVolume, beepPitch, doubleSpaceKeeps, doubleSpaceMs, repackColumns, repackThumbnailSize, repackPanelWidth, minLogSessionMinutes, onClose, onSaved]);
+  }, [categories, hasBlockingErrors, viewerMode, controlsHideDelay, controlBarMode, defaultDocked, defaultPanelWidth, startFullscreen, darkBgBrightness, lightBgBrightness, useSourceFolder, customOutputFolder, beepOnLastPage, beepVolume, beepPitch, repackColumns, repackThumbnailSize, repackPanelWidth, minLogSessionMinutes, onClose, onSaved]);
 
   const updateCategory = (index: number, field: string, value: string) => {
     setCategories(prev => prev.map((c, i) => i === index ? { ...c, [field]: value } : c));
@@ -612,29 +606,6 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
                 <label className={`text-sm ${subtext}`}>Start in Fullscreen Mode</label>
                 <input type="checkbox" checked={startFullscreen} onChange={e => setStartFullscreen(e.target.checked)} className="accent-blue-500" />
               </div>
-              <div className="flex items-center justify-between">
-                <div>
-                  <label className={`text-sm ${subtext}`}>Double Space Keeps</label>
-                  <p className={`text-xs ${subtext} opacity-70`}>
-                    Double-tap SPACE in the viewer to Keep the current file. Same setting as the
-                    "Double Space Keeps" toggle in the playlist panel — changing it here applies
-                    immediately and is remembered between launches.
-                  </p>
-                </div>
-                <input type="checkbox" checked={doubleSpaceKeeps} onChange={e => setDoubleSpaceKeeps(e.target.checked)} className="accent-blue-500" />
-              </div>
-              {doubleSpaceKeeps && (
-                <div className="pl-1">
-                  <label className={`text-sm ${subtext} block mb-1`}>Double-tap window ({doubleSpaceMs} ms)</label>
-                  <input type="range" min={100} max={500} step={20} value={doubleSpaceMs}
-                    onChange={e => setDoubleSpaceMs(Number(e.target.value))} className="w-full accent-blue-500" />
-                  <p className={`text-xs ${subtext} opacity-70 mt-1`}>
-                    Two Space taps within this gap count as a double-tap-to-Keep. Lower it if
-                    normal page-turning triggers accidental Keeps (default 200 ms; ~120–160 ms
-                    suits fast readers).
-                  </p>
-                </div>
-              )}
               <div>
                 <label className={`text-sm ${subtext} block mb-1`}>Default Panel Width (px)</label>
                 <input type="number" value={defaultPanelWidth} onChange={e => setDefaultPanelWidth(Number(e.target.value))}

@@ -3,6 +3,8 @@ import { FileInfo } from '../lib/types';
 
 interface NavigationOptions {
   files: FileInfo[];
+  /** Playlist positions matching the search box; null = no active search. */
+  activeIndices: number[] | null;
   currentIndex: number;
   shuffleEnabled: boolean;
   skipViewedEnabled: boolean;
@@ -102,15 +104,86 @@ export function pickNextIndex(opts: {
   return newIndex;
 }
 
+/**
+ * Which playlist positions the search box currently matches.
+ * Returns null when there's no active search — callers treat null as "no filter"
+ * and take the unfiltered fast path, so an empty box costs nothing.
+ *
+ * Matching is case-insensitive substring on the FILE NAME only (not the folder
+ * path): the playlist can hold files from several folders, and matching paths
+ * would make a query like "keep" select every file already sorted into [00-Keep].
+ */
+export function computeActiveIndices(files: FileInfo[], query: string): number[] | null {
+  const q = query.trim().toLowerCase();
+  if (!q) return null;
+  const out: number[] = [];
+  for (let i = 0; i < files.length; i++) {
+    if (files[i].name.toLowerCase().includes(q)) out.push(i);
+  }
+  return out;
+}
+
+/**
+ * pickNextIndex, restricted to the files the search box currently matches.
+ *
+ * This is a THIN ADAPTER, deliberately: it translates real playlist positions
+ * into "position among the matches", runs the UNCHANGED pickNextIndex over that
+ * smaller space, and translates the answer back. Shuffle, Skip-Viewed and the
+ * post-sort advance therefore inherit search behaviour for free, and there is
+ * still exactly ONE index-picking algorithm — see the "don't fork it again"
+ * history on pickNextIndex above.
+ *
+ * The current file not being among the matches is NOT a special case; it falls
+ * out of the translation. `indexOf` returns -1, and the base algorithm already
+ * maps -1 to "first match" for next, "last match" for back, and a free uniform
+ * draw for random. That is exactly the intended behaviour: typing a search never
+ * moves the page you are reading, and the first Next carries you into the results.
+ */
+export function pickNextIndexFiltered(opts: {
+  action: 'next' | 'back' | 'random' | 'after-remove';
+  files: FileInfo[];
+  /** null = no active search. */
+  activeIndices: number[] | null;
+  currentIndex: number;
+  shuffleEnabled: boolean;
+  skipViewedEnabled: boolean;
+  viewedPaths: Set<string>;
+  resetViewed: () => void;
+}): number | null {
+  const { activeIndices, files, currentIndex, action, ...rest } = opts;
+
+  if (activeIndices === null) {
+    return pickNextIndex({ action, files, currentIndex, ...rest });
+  }
+  if (activeIndices.length === 0) return null; // search matches nothing
+
+  // For 'after-remove', currentIndex is the slot the sorted file VACATED, and
+  // activeIndices is already computed against the post-removal list — so the
+  // anchor is the first match at or after that slot. findIndex returning -1
+  // (nothing left at or after it) is the wrap-to-start case, which the base
+  // algorithm's out-of-range check already handles.
+  const pos = action === 'after-remove'
+    ? activeIndices.findIndex(i => i >= currentIndex)
+    : activeIndices.indexOf(currentIndex);
+
+  const picked = pickNextIndex({
+    action,
+    files: activeIndices.map(i => files[i]),
+    currentIndex: pos,
+    ...rest,
+  });
+  return picked === null ? null : activeIndices[picked];
+}
+
 export function useNavigation(opts: NavigationOptions) {
   const {
-    files, currentIndex, shuffleEnabled, skipViewedEnabled,
+    files, activeIndices, currentIndex, shuffleEnabled, skipViewedEnabled,
     viewedPaths, setCurrentIndex, addViewed, resetViewed, broadcast,
   } = opts;
 
   const navigate = useCallback((action: 'next' | 'back' | 'random') => {
-    const newIndex = pickNextIndex({
-      action, files, currentIndex, shuffleEnabled,
+    const newIndex = pickNextIndexFiltered({
+      action, files, activeIndices, currentIndex, shuffleEnabled,
       skipViewedEnabled, viewedPaths, resetViewed,
     });
     if (newIndex === null) return;
@@ -118,7 +191,7 @@ export function useNavigation(opts: NavigationOptions) {
     addViewed(files[newIndex].fullPath);
     setCurrentIndex(newIndex);
     broadcast(newIndex);
-  }, [files, currentIndex, shuffleEnabled, skipViewedEnabled, viewedPaths, setCurrentIndex, addViewed, resetViewed, broadcast]);
+  }, [files, activeIndices, currentIndex, shuffleEnabled, skipViewedEnabled, viewedPaths, setCurrentIndex, addViewed, resetViewed, broadcast]);
 
   const jumpTo = useCallback((index: number) => {
     if (index < 0 || index >= files.length) return;

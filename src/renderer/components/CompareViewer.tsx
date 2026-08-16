@@ -120,9 +120,10 @@ export default function CompareViewer(props: CompareViewerProps) {
       // F11 handled by Electron menu bar accelerator — don't duplicate here
       // Sync toggle moved to MIDDLE-CLICK (see the container's onMouseDown). Ctrl+I
       // is now the global Immerse toggle, so it must NOT be captured here anymore.
-      // Ctrl+F cycles fit mode: Fit → Height → Width → Fit. Same behavior as
-      // the main CbzViewer; local to this component because fitMode is local.
-      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') {
+      // Ctrl+SHIFT+F cycles fit mode: Fit → Height → Width → Fit. Same behavior
+      // as the main CbzViewer; local to this component because fitMode is local.
+      // It moved off plain Ctrl+F in session 15, which now focuses the search box.
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') {
         e.preventDefault();
         setFitMode(curr => {
           const cycle: FitMode[] = ['fit-page', 'fit-height', 'fit-width'];

@@ -38,6 +38,8 @@ export interface AppConfig {
   beepOnLastPage: boolean;
   beepVolume: number;
   beepPitch: number;
+  thumbListEnabled: boolean;
+  thumbLayout: 'small' | 'large' | 'cover';
 }
 // NOTE: `doubleSpaceKeeps` / `doubleSpaceMs` were removed in session 15 (the
 // double-tap-Space-to-Keep gesture was dropped as unused). Existing config files
@@ -70,6 +72,8 @@ const DEFAULT_CONFIG: AppConfig = {
   beepOnLastPage: true,
   beepVolume: 0.15,
   beepPitch: 600,
+  thumbListEnabled: false,
+  thumbLayout: 'small' as const,
 };
 
 function getConfigPath(): string {

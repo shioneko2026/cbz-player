@@ -8,6 +8,7 @@ import { createViewerWindow, createPlaylistWindow, getViewerWindow, getPlaylistW
 import { scanForCbzFiles, getFileInfoFromPaths, detectSortDestination, ensureSortFolders, sortFile, unsortFile, moveToHolding, cleanupHoldingSubfolder, listStrandedHoldingFiles, renameFile, resolveCategoryBasePath, DEFAULT_CATEGORIES, SUPPORTED_ARCHIVE_EXTS } from './file-operations';
 import { loadConfig, saveConfig } from './config-store';
 import { extractCbz, cleanupTemp, cleanupSlot, resolveImage, getSlotSources, getSlotNames, hasSlot, getSlotDebugInfo, type ImageSource } from './cbz-extractor';
+import { requestThumb, cancelThumb, clearCache as clearThumbCache, getCacheStats as getThumbCacheStats, getCacheDir as getThumbCacheDir, initThumbCache, setRendererConverter } from './thumbnail-service';
 import { saveSessionLog } from './session-logger';
 
 // Track which window type each webContents ID maps to
@@ -125,6 +126,11 @@ function mimeForImageName(name: string): string {
 // Register custom protocol for serving extracted CBZ images
 protocol.registerSchemesAsPrivileged([
   { scheme: 'cbz-image', privileges: { standard: true, secure: true, supportFetchAPI: true } },
+  // Playlist cover thumbnails. Unlike cbz-image, these URLs are STABLE and
+  // content-addressed (key = file size + mtime), so revisiting a file reuses one
+  // cache entry instead of minting a fresh never-evicted one. That difference is
+  // deliberate — see the memory blocker notes in the vault's HANDOFF §6.
+  { scheme: 'cbz-thumb', privileges: { standard: true, secure: true, supportFetchAPI: true } },
 ]);
 
 // ─── Single-instance lock ───────────────────────────────────────────────────
@@ -429,6 +435,37 @@ app.whenReady().then(() => {
     }
   });
 
+  // Cover thumbnails for Thumb List mode. Serves only files inside the cache
+  // dir; the key comes straight off the URL so it is validated against path
+  // traversal before touching the filesystem.
+  // URL format: cbz-thumb://thumb/{sizeBytes}_{mtimeMs}.jpg
+  protocol.handle('cbz-thumb', async (request) => {
+    const url = new URL(request.url);
+    const requested = decodeURIComponent(url.pathname.replace(/^\/+/, ''));
+    // Keys are generated as `${size}_${mtimeMs}.jpg`; anything else is refused
+    // outright rather than resolved and checked afterwards.
+    if (!/^\d+_\d+\.jpg$/.test(requested)) {
+      return new Response(null, { status: 404 });
+    }
+    const filePath = path.join(getThumbCacheDir(), requested);
+    try {
+      const buffer = await fs.promises.readFile(path.toNamespacedPath(filePath));
+      return new Response(bufferToBody(buffer), {
+        status: 200,
+        headers: {
+          'Content-Type': 'image/jpeg',
+          // Safe to cache hard: a given key maps to one immutable set of bytes.
+          // Clearing the cache also flushes Chromium's copy (see thumbs:clear-cache).
+          'Cache-Control': 'public, max-age=31536000, immutable',
+        },
+      });
+    } catch {
+      return new Response(null, { status: 404 });
+    }
+  });
+
+  initThumbCache();
+
   const viewer = createViewerWindow(config.viewerWindowBounds);
   const playlist = createPlaylistWindow(config.playlistWindowBounds, config.isDocked);
 
@@ -658,6 +695,63 @@ app.whenReady().then(() => {
   ipcMain.handle('cbz:cleanup', async (_event, slot?: string) => {
     if (slot) cleanupSlot(slot);
     else cleanupTemp();
+  });
+
+  // ─── Playlist cover thumbnails (Thumb List) ─────────────────────────────────
+  // The result is pushed to BOTH windows, not just the requester: the detached
+  // playlist runs its own row observer, so a reply-to-requester-only design
+  // would leave one window's rows stuck showing placeholders forever.
+  ipcMain.handle('thumbs:get', async (_event, fullPath: string) => {
+    const result = await requestThumb(fullPath);
+    if (result.status === 'ready') {
+      sendToAll('thumbs:ready', { fullPath, url: result.url });
+    } else if (result.reason !== 'cancelled') {
+      sendToAll('thumbs:ready', { fullPath, failed: true, reason: result.reason });
+    }
+    return result;
+  });
+
+  ipcMain.on('thumbs:cancel', (_event, fullPath: string) => {
+    cancelThumb(fullPath);
+  });
+
+  ipcMain.handle('thumbs:cache-stats', () => getThumbCacheStats());
+
+  ipcMain.handle('thumbs:clear-cache', async () => {
+    clearThumbCache();
+    // Thumb URLs are served `immutable`, and a regenerated cover reuses the same
+    // key — so wiping only the disk folder would leave Chromium happily serving
+    // the old bytes, including a bad one. Flush its cache too or "Clear" lies.
+    try { await getViewerWindow()?.webContents.session.clearCache(); } catch {}
+    sendToAll('thumbs:cleared');
+    return getThumbCacheStats();
+  });
+
+  // webp/avif covers: nativeImage can't decode them (verified), but Chromium in
+  // the renderer can. Main hands the raw bytes to the viewer window, which
+  // decodes, downscales and returns a JPEG for caching. Once per file, ever.
+  let convertSeq = 0;
+  const convertWaiters = new Map<number, (jpeg: Buffer | null) => void>();
+
+  ipcMain.on('thumbs:converted', (_event, payload: { id: number; data?: ArrayBuffer | Uint8Array | null }) => {
+    const resolve = convertWaiters.get(payload?.id);
+    if (!resolve) return;
+    convertWaiters.delete(payload.id);
+    const data = payload?.data;
+    resolve(data ? Buffer.from(data as any) : null);
+  });
+
+  setRendererConverter((buffer, mime) => {
+    const vw = getViewerWindow();
+    if (!vw || vw.isDestroyed()) return Promise.resolve(null);
+    const id = ++convertSeq;
+    return new Promise<Buffer | null>((resolve) => {
+      const timer = setTimeout(() => {
+        if (convertWaiters.delete(id)) resolve(null);
+      }, 15000);
+      convertWaiters.set(id, (jpeg) => { clearTimeout(timer); resolve(jpeg); });
+      vw.webContents.send('thumbs:convert', { id, data: bufferToBody(buffer), mime });
+    });
   });
 
   // ─── Delete Files (to recycle bin) ──────────────────────────────────────────

@@ -1,6 +1,63 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { FileInfo } from '../lib/types';
 import { computeActiveIndices } from '../hooks/useNavigation';
+import { useCoverThumbs, type ThumbState } from '../hooks/useCoverThumbs';
+
+export type ThumbLayout = 'small' | 'large' | 'cover';
+
+/**
+ * Cover box geometry per layout. Heights are fixed so a row never changes size
+ * when its cover arrives — a shifting list under the cursor while scrolling
+ * 15,000 files would be miserable. Covers are letterboxed inside the box
+ * (object-contain) rather than cropped, since a cropped doujin cover loses the
+ * part you recognise it by.
+ */
+const THUMB_BOX: Record<ThumbLayout, { w: string; h?: string; aspect?: string; stacked: boolean }> = {
+  small: { w: '48px', h: '68px', stacked: false },
+  large: { w: '96px', h: '136px', stacked: false },
+  // Cover-above scales with the panel instead of using a fixed height, so it
+  // really is full width. The height comes from a typical cover's proportions
+  // rather than the actual image, so the row size is still known before the
+  // picture arrives and the list never jumps under the cursor.
+  cover: { w: '100%', aspect: '1 / 1.414', stacked: true },
+};
+
+/** The cover cell: placeholder → image → failure marker. */
+function ThumbCell({ state, layout, paneDark }: {
+  state: ThumbState | undefined; layout: ThumbLayout; paneDark: boolean;
+}) {
+  const box = THUMB_BOX[layout];
+  const base: React.CSSProperties = {
+    width: box.w, height: box.h, aspectRatio: box.aspect,
+    flexShrink: box.stacked ? undefined : 0,
+    marginBottom: box.stacked ? '6px' : undefined,
+  };
+  const shell = paneDark ? 'bg-zinc-800/60' : 'bg-zinc-200/70';
+
+  if (state && 'url' in state) {
+    return (
+      <img
+        src={state.url}
+        alt=""
+        draggable={false}
+        style={{ ...base, objectFit: 'contain' }}
+        className={`rounded-sm ${shell}`}
+      />
+    );
+  }
+  if (state && 'failed' in state) {
+    return (
+      <div
+        style={base}
+        title={state.reason ? `No cover: ${state.reason}` : 'No cover'}
+        className={`rounded-sm ${shell} flex items-center justify-center text-[10px] ${paneDark ? 'text-zinc-500' : 'text-zinc-400'}`}
+      >
+        no cover
+      </div>
+    );
+  }
+  return <div style={base} className={`rounded-sm ${shell}`} />;
+}
 
 // ─── Sub-components ────────────────────────────────────────────────────────────
 
@@ -171,6 +228,11 @@ export interface PlaylistPanelProps {
   // viewer's usePlaylistState (or, for the detached panel, gets broadcast).
   canUndo?: boolean;
   initialLogHeight?: number;
+  // Thumb List: cover thumbnails on playlist rows. Layout is a user setting;
+  // all three sizes read the same cached thumbnail, so switching is free.
+  thumbListEnabled?: boolean;
+  onSetThumbList?: (v: boolean) => void;
+  thumbLayout?: ThumbLayout;
 }
 
 // ─── Component ─────────────────────────────────────────────────────────────────
@@ -186,6 +248,10 @@ export default function PlaylistPanel(props: PlaylistPanelProps) {
     compareMode, comparePickMode, comparePickTwoMode, compareLeftIndex, compareFileIndex,
     onCompareWithCurrent, onCycleComparePick, onCancelComparePick,
   } = props;
+
+  const thumbListEnabled = props.thumbListEnabled ?? false;
+  const thumbLayout: ThumbLayout = props.thumbLayout ?? 'small';
+  const { thumbs, observeRow, unobserveRow } = useCoverThumbs(thumbListEnabled);
 
   const renameInputRef = useRef<HTMLInputElement>(null);
 
@@ -399,6 +465,13 @@ export default function PlaylistPanel(props: PlaylistPanelProps) {
           disabled={!isDocked}
           title={isDocked ? 'Black out every monitor except the viewer' : 'Immerse requires docked playlist'}
         />
+        <ThemedToggle
+          label="Thumb List"
+          checked={props.thumbListEnabled ?? false}
+          onChange={(v) => props.onSetThumbList?.(v)}
+          paneDark={paneDark}
+          title="Show cover thumbnails in the playlist (size in Settings > UI Behavior)"
+        />
       </div>
 
       {/* Sort Buttons */}
@@ -547,6 +620,15 @@ export default function PlaylistPanel(props: PlaylistPanelProps) {
                 <div
                   key={file.fullPath}
                   data-current={isCurrent}
+                  ref={thumbListEnabled ? (el) => {
+                    observeRow(el, file.fullPath);
+                    // React 19 ref cleanup. Without unobserving, the observers
+                    // would keep hard references to every row element ever
+                    // rendered — and rows churn constantly as the search filter
+                    // changes. That is a leak, and this file has an open
+                    // memory blocker; don't remove this.
+                    return () => unobserveRow(el);
+                  } : undefined}
                   onClick={() => {
                     if (isRenaming) return;
                     if (selectionMode) { toggleSelection(file.fullPath); return; }
@@ -555,7 +637,9 @@ export default function PlaylistPanel(props: PlaylistPanelProps) {
                     onJumpTo(idx);
                   }}
                   onContextMenu={(e) => handleContextMenu(e, idx)}
-                  className={`px-2 py-1.5 rounded cursor-pointer transition-colors flex items-start gap-2 border-l-2 ${
+                  className={`px-2 py-1.5 rounded cursor-pointer transition-colors flex ${
+                    thumbListEnabled && thumbLayout === 'cover' ? 'flex-col items-stretch' : 'items-start'
+                  } gap-2 border-l-2 ${
                     isComparing
                       ? (paneDark ? 'bg-teal-900/30 text-teal-300 border-l-teal-400' : 'bg-teal-100 text-teal-700 border-l-teal-500')
                       : isCompareLeft
@@ -567,6 +651,14 @@ export default function PlaylistPanel(props: PlaylistPanelProps) {
                             : `border-l-transparent ${t.playlistHover} ${isViewed ? t.fileSizeText : t.fileText}`
                   }`}
                 >
+                  {/* Cover-above layout: the thumbnail is its own band, with the
+                      number/name/size line beneath it. The other two layouts put
+                      the cover inline and use `contents` so this wrapper is
+                      invisible to flex — row layout there is exactly as before. */}
+                  {thumbListEnabled && thumbLayout === 'cover' && (
+                    <ThumbCell state={thumbs.get(file.fullPath)} layout={thumbLayout} paneDark={paneDark} />
+                  )}
+                  <div className={thumbListEnabled && thumbLayout === 'cover' ? 'flex items-start gap-2' : 'contents'}>
                   {/* Selection checkbox */}
                   {selectionMode && (
                     <input
@@ -580,6 +672,9 @@ export default function PlaylistPanel(props: PlaylistPanelProps) {
                   <span className={`text-xs flex-shrink-0 w-6 text-right tabular-nums pt-0.5 ${isCurrent ? '' : t.fileSizeText}`}>
                     {idx + 1}
                   </span>
+                  {thumbListEnabled && thumbLayout !== 'cover' && (
+                    <ThumbCell state={thumbs.get(file.fullPath)} layout={thumbLayout} paneDark={paneDark} />
+                  )}
                   {isRenaming ? (
                     <textarea
                       ref={renameInputRef as any}
@@ -616,6 +711,7 @@ export default function PlaylistPanel(props: PlaylistPanelProps) {
                   <span className={`text-xs flex-shrink-0 pt-0.5 ${t.fileSizeText}`}>
                     {formatSize(file.sizeBytes)}
                   </span>
+                  </div>
                 </div>
               );
             })}

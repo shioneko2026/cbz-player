@@ -82,11 +82,23 @@ interface SettingsModalProps {
   onSaved?: () => void;
   darkMode: boolean;
   onLiveBgChange?: (darkBrightness: number, lightBrightness: number) => void;
+  // Thumb List layout is applied and persisted live by App, NOT through this
+  // modal's save payload. Keeping it out of the snapshot is what stops a
+  // Settings save from clobbering a value the playlist panel owns.
+  thumbLayout?: 'small' | 'large' | 'cover';
+  onSetThumbLayout?: (v: 'small' | 'large' | 'cover') => void;
 }
 
 type Tab = 'categories' | 'folders' | 'viewer' | 'repack' | 'ui' | 'logging' | 'shortcuts';
 
-export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLiveBgChange }: SettingsModalProps) {
+export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLiveBgChange, thumbLayout, onSetThumbLayout }: SettingsModalProps) {
+  const [thumbCache, setThumbCache] = useState<{ fileCount: number; totalBytes: number } | null>(null);
+  const [clearingThumbs, setClearingThumbs] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    window.electronAPI?.getThumbCacheStats?.().then(setThumbCache).catch(() => setThumbCache(null));
+  }, [isOpen]);
   const [tab, setTab] = useState<Tab>('categories');
   const [categories, setCategories] = useState<CategoryConfig[]>([]);
   const [viewerMode, setViewerMode] = useState('single');
@@ -634,6 +646,60 @@ export default function SettingsModal({ isOpen, onClose, onSaved, darkMode, onLi
                   }} min={216} max={232} step={1} className="flex-1 accent-blue-500" />
                   <div className="w-8 h-8 rounded border border-zinc-300" style={{ backgroundColor: `rgb(${lightBgBrightness},${lightBgBrightness},${lightBgBrightness})` }} />
                   <span className={`text-xs tabular-nums ${subtext}`}>#{lightBgBrightness.toString(16).padStart(2,'0').repeat(3).toUpperCase()}</span>
+                </div>
+              </div>
+              <div className={`p-3 rounded border ${border} space-y-3`}>
+                <div>
+                  <label className={`text-sm ${text} block mb-1`}>Thumb List cover size</label>
+                  <p className={`text-xs ${subtext} mb-2`}>
+                    How big each cover is when <strong className={text}>Thumb List</strong> is on (toggle lives in the playlist panel).
+                    All three sizes use the same stored cover, so switching is instant and nothing is regenerated.
+                  </p>
+                  <div className="flex gap-2">
+                    {([
+                      ['small', 'Small', 'Cover beside the name — most files per screen'],
+                      ['large', 'Large', 'Bigger cover beside the name'],
+                      ['cover', 'Cover above', 'Full-width cover with the name underneath'],
+                    ] as const).map(([value, label, hint]) => (
+                      <button
+                        key={value}
+                        onClick={() => onSetThumbLayout?.(value)}
+                        title={hint}
+                        className={`flex-1 text-xs px-2 py-1.5 rounded border transition-colors ${
+                          (thumbLayout ?? 'small') === value
+                            ? 'border-blue-500 text-blue-400'
+                            : `${border} ${subtext} hover:text-zinc-300`
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className={`text-sm ${text}`}>Stored covers</p>
+                    <p className={`text-xs ${subtext}`}>
+                      {thumbCache
+                        ? `${thumbCache.fileCount.toLocaleString('en-GB')} covers · ${(thumbCache.totalBytes / 1048576).toFixed(1)} MB (capped at 500 MB)`
+                        : 'Reading…'}
+                    </p>
+                  </div>
+                  <button
+                    onClick={async () => {
+                      setClearingThumbs(true);
+                      try {
+                        const stats = await window.electronAPI?.clearThumbCache?.();
+                        setThumbCache(stats ?? { fileCount: 0, totalBytes: 0 });
+                      } finally {
+                        setClearingThumbs(false);
+                      }
+                    }}
+                    disabled={clearingThumbs}
+                    className={`text-xs px-2 py-1.5 rounded border ${border} ${subtext} hover:text-zinc-300 disabled:opacity-50`}
+                  >
+                    {clearingThumbs ? 'Clearing…' : 'Clear cover cache'}
+                  </button>
                 </div>
               </div>
               <button onClick={resetUI} className="mt-2 text-xs text-red-400 hover:text-red-300">

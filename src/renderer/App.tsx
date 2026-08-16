@@ -51,6 +51,14 @@ declare global {
       onExplorerOpen: (callback: (payload: { files: FileInfo[]; mode: 'replace' | 'append'; sortDestination: string | null }) => void) => void;
       onExplorerCompare: (callback: (payload: { left: FileInfo; right: FileInfo }) => void) => void;
       onExplorerRepack: (callback: (payload: { file: FileInfo }) => void) => void;
+      getThumb: (fullPath: string) => Promise<{ status: 'ready'; url: string } | { status: 'failed'; reason: string }>;
+      cancelThumb: (fullPath: string) => void;
+      onThumbReady: (callback: (payload: { fullPath: string; url?: string; failed?: boolean; reason?: string }) => void) => void;
+      onThumbCacheCleared: (callback: () => void) => void;
+      onThumbConvertRequest: (callback: (payload: { id: number; data: Uint8Array; mime: string }) => void) => void;
+      sendThumbConverted: (id: number, data: Uint8Array | null) => void;
+      clearThumbCache: () => Promise<{ fileCount: number; totalBytes: number }>;
+      getThumbCacheStats: () => Promise<{ fileCount: number; totalBytes: number }>;
     };
   }
 }
@@ -179,6 +187,11 @@ function usePlaylistState() {
   // Toggle is grayed out when !isDocked; detaching auto-disables it (main
   // process both tears down blackouts and broadcasts immerse:changed=false).
   const [immerseEnabled, setImmerseEnabledState] = useState(false);
+  // Thumb List is a remembered view preference (unlike Immerse, which is a
+  // per-session reading mode). Persisted on change so it survives any exit
+  // route, including the window X — see the persistence-routes gotcha.
+  const [thumbListEnabled, setThumbListEnabledState] = useState(false);
+  const [thumbLayout, setThumbLayoutState] = useState<'small' | 'large' | 'cover'>('small');
   const [renamingIndex, setRenamingIndex] = useState<number | null>(null);
   const currentIndexRef = useRef(0);
   useEffect(() => { currentIndexRef.current = currentIndex; }, [currentIndex]);
@@ -232,6 +245,8 @@ function usePlaylistState() {
       if (cfg.categories?.length > 0) setCategories(cfg.categories);
       if (cfg.writeLogsEnabled !== undefined) setWriteLogsEnabled(cfg.writeLogsEnabled);
       if (cfg.minLogSessionMinutes !== undefined) setMinLogSessionMinutes(cfg.minLogSessionMinutes);
+      if (cfg.thumbListEnabled !== undefined) setThumbListEnabledState(cfg.thumbListEnabled);
+      if (cfg.thumbLayout) setThumbLayoutState(cfg.thumbLayout);
       setConfigLoaded(true);
     });
   }, []);
@@ -242,6 +257,17 @@ function usePlaylistState() {
   // saveUiState → config:save-ui → saveConfig (a merging write), which survives
   // closing the app with the window X / Alt+F4. See Architecture.md's
   // "Window State Persistence" table for when to use it vs. reportUiState.
+  //
+  // Thumb List uses exactly that route: a discrete, low-frequency toggle whose
+  // value must not be lost on an X-close.
+  const setThumbListEnabled = useCallback((v: boolean) => {
+    setThumbListEnabledState(v);
+    window.electronAPI?.saveUiState?.({ thumbListEnabled: v });
+  }, []);
+  const setThumbLayout = useCallback((v: 'small' | 'large' | 'cover') => {
+    setThumbLayoutState(v);
+    window.electronAPI?.saveUiState?.({ thumbLayout: v });
+  }, []);
 
   const broadcast = useCallback((idx: number) => {
     window.electronAPI?.broadcastState({ currentIndex: idx });
@@ -703,6 +729,8 @@ function usePlaylistState() {
     globalHotkeys, setGlobalHotkeys, viewedPaths, setViewedPaths,
     paneDark, setPaneDark, viewerDark, setViewerDark, isDocked,
     immerseEnabled, setImmerseEnabled,
+    thumbListEnabled, setThumbListEnabled, thumbLayout, setThumbLayout,
+    setThumbListEnabledState, setThumbLayoutState,
     renamingIndex, setRenamingIndex, startRenaming, handleRename,
     handleSort, isProcessing,
     lastUndo, handleUndo,
@@ -1065,6 +1093,8 @@ function ViewerWindow() {
       skipViewedEnabled: ps.skipViewedEnabled,
       searchQuery: ps.searchQuery,
       writeLogsEnabled: ps.writeLogsEnabled,
+      thumbListEnabled: ps.thumbListEnabled,
+      thumbLayout: ps.thumbLayout,
       globalHotkeys: ps.globalHotkeys,
       paneDark: ps.paneDark,
       viewerDark: ps.viewerDark,
@@ -1113,6 +1143,7 @@ function ViewerWindow() {
         case 'setSearchQuery': ps.setSearchQuery(action.value); break;
         case 'setSkipViewed': ps.setSkipViewedEnabled(action.value); break;
         case 'setWriteLogs': ps.setWriteLogsEnabled(action.value); break;
+        case 'setThumbList': ps.setThumbListEnabled(action.value); break;
         case 'setGlobalHotkeys': ps.setGlobalHotkeys(action.value); break;
         case 'setPaneDark': ps.setPaneDark(action.value); break;
         case 'setViewerDark': ps.handleViewerTheme(action.value); break;
@@ -1570,6 +1601,9 @@ function ViewerWindow() {
               onSetGlobalHotkeys={ps.setGlobalHotkeys}
               onSetPaneDark={ps.setPaneDark}
               onSetViewerDark={(dark) => ps.handleViewerTheme(dark)}
+              thumbListEnabled={ps.thumbListEnabled}
+              thumbLayout={ps.thumbLayout}
+              onSetThumbList={ps.setThumbListEnabled}
               immerseEnabled={ps.immerseEnabled}
               onSetImmerse={ps.setImmerseEnabled}
               onToggleDocked={ps.handleToggleDocked}
@@ -1646,6 +1680,8 @@ function ViewerWindow() {
           setDarkBgBrightness(dark);
           setLightBgBrightness(light);
         }}
+        thumbLayout={ps.thumbLayout}
+        onSetThumbLayout={ps.setThumbLayout}
       />
     </div>
   );
@@ -1748,6 +1784,9 @@ function PlaylistWindow() {
         onSetSkipViewed={(v) => send({ type: 'setSkipViewed', value: v })}
         writeLogsEnabled={state.writeLogsEnabled}
         onSetWriteLogs={(v) => send({ type: 'setWriteLogs', value: v })}
+        thumbListEnabled={state.thumbListEnabled}
+        thumbLayout={state.thumbLayout}
+        onSetThumbList={(v) => send({ type: 'setThumbList', value: v })}
         onSetGlobalHotkeys={(v) => send({ type: 'setGlobalHotkeys', value: v })}
         onSetPaneDark={(v) => send({ type: 'setPaneDark', value: v })}
         onSetViewerDark={(v) => send({ type: 'setViewerDark', value: v })}

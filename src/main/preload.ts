@@ -44,6 +44,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('cbz:extract-progress', (_event, progress) => callback(progress));
   },
 
+  // Playlist cover thumbnails (Thumb List). getThumb resolves for the caller,
+  // but the authoritative delivery is the onThumbReady broadcast — both windows
+  // render rows and both need to hear about a cover that just landed.
+  getThumb: (fullPath: string) => ipcRenderer.invoke('thumbs:get', fullPath),
+  cancelThumb: (fullPath: string) => ipcRenderer.send('thumbs:cancel', fullPath),
+  onThumbReady: (callback: (payload: { fullPath: string; url?: string; failed?: boolean; reason?: string }) => void) => {
+    ipcRenderer.on('thumbs:ready', (_event, payload) => callback(payload));
+  },
+  onThumbCacheCleared: (callback: () => void) => {
+    ipcRenderer.on('thumbs:cleared', () => callback());
+  },
+  // webp/avif covers main cannot decode: it ships the bytes here, the renderer
+  // decodes them with Chromium and hands back a JPEG for caching.
+  onThumbConvertRequest: (callback: (payload: { id: number; data: Uint8Array; mime: string }) => void) => {
+    ipcRenderer.on('thumbs:convert', (_event, payload) => callback(payload));
+  },
+  sendThumbConverted: (id: number, data: Uint8Array | null) => ipcRenderer.send('thumbs:converted', { id, data }),
+  clearThumbCache: () => ipcRenderer.invoke('thumbs:clear-cache'),
+  getThumbCacheStats: () => ipcRenderer.invoke('thumbs:cache-stats') as Promise<{ fileCount: number; totalBytes: number }>,
+
   // Config
   loadConfig: () => ipcRenderer.invoke('config:load'),
   saveUiState: (state: any) => ipcRenderer.send('config:save-ui', state),
